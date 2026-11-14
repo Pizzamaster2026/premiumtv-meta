@@ -40,6 +40,10 @@ RATE_WINDOW_S = 10.0
 HTTP_TIMEOUT_LIST = 90
 HTTP_TIMEOUT_TMDB = 25
 USER_AGENT = "premiumtv-meta-sync/1.0"
+# Leave headroom under the workflow's timeout-minutes: 120 so a partial
+# result can be written and committed before the job is killed.
+DEFAULT_TIME_BUDGET_MIN = 100
+DEFAULT_CHECKPOINT_EVERY = 500
 
 PROVIDERS = (
     {"id": "premiumtv", "url": "PTV_URL", "user": "PTV_USER", "pass": "PTV_PASS"},
@@ -418,6 +422,63 @@ def is_fresh(entry: dict, now: datetime, days: int) -> bool:
     return (now - ts).total_seconds() < days * 86400
 
 
+def env_number(name: str, default: float, kind=float):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return kind(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def time_budget_seconds() -> tuple[float, float]:
+    minutes = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
+    if minutes < 0:
+        minutes = 0.0
+    return minutes, minutes * 60.0
+
+
+def checkpoint_every() -> int:
+    n = int(env_number("SYNC_CHECKPOINT_EVERY", DEFAULT_CHECKPOINT_EVERY, float))
+    return n if n > 0 else DEFAULT_CHECKPOINT_EVERY
+
+
+def build_indexes(groups: list[dict]) -> tuple[dict, dict]:
+    by_id: dict[str, str] = {}
+    by_title: dict[str, str] = {}
+    for g in groups:
+        ekey = g.get("resolved")
+        if not ekey:
+            continue
+        for ref in g["refs"]:
+            by_id[f"{ref['provider']}:{ref['type']}:{ref['id']}"] = ekey
+            by_title[title_key(ref["type"], ref["name"], ref["year"])] = ekey
+        by_title[title_key(g["type"], g["query"], g["year"])] = ekey
+    return by_id, by_title
+
+
+def catalogue_title_keys(groups: list[dict]) -> set[str]:
+    keys: set[str] = set()
+    for g in groups:
+        keys.add(title_key(g["type"], g["query"], g["year"]))
+        for ref in g["refs"]:
+            keys.add(title_key(ref["type"], ref["name"], ref["year"]))
+    return keys
+
+
+def prune_unreferenced_entries(entries: dict, by_id: dict, by_title: dict) -> dict:
+    """Drop cache entries that no current catalogue title points at."""
+    referenced = set(by_id.values()) | set(by_title.values())
+    return {k: e for k, e in entries.items() if k in referenced}
+
+
+def prune_misses(misses: dict, groups: list[dict], now: datetime) -> dict:
+    """Drop misses for titles that left the catalogue; keep others for 180 days."""
+    live = catalogue_title_keys(groups)
+    return {k: m for k, m in misses.items() if k in live and is_fresh(m, now, 180)}
+
+
 # ---------------------------------------------------------------------------
 # Load / write cache
 # ---------------------------------------------------------------------------
@@ -624,6 +685,62 @@ def sync(data_dir: Path) -> int:
 
     entries, misses, prev_by_title = load_existing(data_dir)
     fetched = skipped = refreshed = new_hits = new_misses = 0
+    budget_min, budget_sec = time_budget_seconds()
+    ckpt_every = checkpoint_every()
+    started = time.monotonic()
+    progress_since_ckpt = 0
+    budget_stopped = False
+    log(f"Zeitbudget: {budget_min:g} Min. (Zwischenstand alle {ckpt_every} neuen Einträge).")
+
+    def budget_hit() -> bool:
+        nonlocal budget_stopped
+        if budget_stopped or (time.monotonic() - started) >= budget_sec:
+            if not budget_stopped:
+                budget_stopped = True
+                log(
+                    f"Zeitbudget von {budget_min:g} Min. erreicht – keine neuen TMDB-Abfragen mehr. "
+                    f"Zwischenstand wird gespeichert ({new_hits} neu, {refreshed} aktualisiert). "
+                    "Der nächste Lauf macht bei den restlichen Titeln weiter."
+                )
+            return True
+        return False
+
+    def attach_cached(g: dict, typ: str, tid, miss_key: str, existing_key) -> None:
+        """Keep a previously stored match without starting a new TMDB lookup."""
+        if existing_key and existing_key in entries:
+            g["resolved"] = existing_key
+            return
+        if tid:
+            ekey = entry_key(typ, tid)
+            if ekey in entries:
+                g["resolved"] = ekey
+                misses.pop(miss_key, None)
+                return
+        miss = misses.get(miss_key)
+        if miss and is_fresh(miss, now, MISS_DAYS):
+            g["resolved"] = None
+            return
+        g["resolved"] = None
+
+    def write_checkpoint(partial: bool) -> None:
+        by_id, by_title = build_indexes(groups)
+        stats_partial = {
+            "providers": sorted(catalogues.keys()),
+            "titles": len(groups),
+            "movies": sum(1 for k in entries if k.startswith("movie:")),
+            "series": sum(1 for k in entries if k.startswith("tv:")),
+            "unmatched": sum(1 for g in groups if not g.get("resolved")),
+            "new": new_hits,
+            "refreshed": refreshed,
+            "misses": new_misses,
+            "skippedFresh": skipped,
+            "tmdbCalls": tmdb.calls,
+            "partial": partial,
+            "budgetStopped": budget_stopped,
+        }
+        write_outputs(data_dir, entries, by_id, by_title, misses, generated_at, stats_partial)
+        (data_dir / ".changed").write_text("1\n", encoding="utf-8")
+        log(f"Zwischenstand geschrieben ({len(entries)} Einträge).")
 
     for g in groups:
         typ, query, year = g["type"], g["query"], g["year"]
@@ -658,12 +775,21 @@ def sync(data_dir: Path) -> int:
             g["resolved"] = None
             continue
 
+        # Stop starting new TMDB lookups once the budget is exhausted, but
+        # still attach already cached matches so later pruning stays correct.
+        if budget_hit():
+            attach_cached(g, typ, tid, miss_key, existing_key)
+            continue
+
         # If we don't have a tmdb id, search (unless we can reuse a stale entry via title — we don't store title on miss only)
         if not tid:
             # Reuse a previously stored id if the stale entry still exists under a known key in misses? misses have tmdbId maybe
             if miss and miss.get("tmdbId"):
                 tid = int(miss["tmdbId"])
             else:
+                if budget_hit():
+                    attach_cached(g, typ, tid, miss_key, existing_key)
+                    continue
                 try:
                     tid = tmdb.search(typ, query, year)
                 except Exception as e:
@@ -675,6 +801,10 @@ def sync(data_dir: Path) -> int:
             misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at}
             g["resolved"] = None
             new_misses += 1
+            progress_since_ckpt += 1
+            if progress_since_ckpt >= ckpt_every:
+                progress_since_ckpt = 0
+                write_checkpoint(partial=True)
             continue
 
         ekey = entry_key(typ, tid)
@@ -683,6 +813,10 @@ def sync(data_dir: Path) -> int:
             skipped += 1
             g["resolved"] = ekey
             misses.pop(miss_key, None)
+            continue
+
+        if budget_hit():
+            attach_cached(g, typ, tid, miss_key, existing_key)
             continue
 
         try:
@@ -697,6 +831,10 @@ def sync(data_dir: Path) -> int:
             misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at}
             g["resolved"] = None
             new_misses += 1
+            progress_since_ckpt += 1
+            if progress_since_ckpt >= ckpt_every:
+                progress_since_ckpt = 0
+                write_checkpoint(partial=True)
             continue
 
         detail["updatedAt"] = generated_at
@@ -707,34 +845,22 @@ def sync(data_dir: Path) -> int:
             refreshed += 1
         else:
             new_hits += 1
+        progress_since_ckpt += 1
+        if progress_since_ckpt >= ckpt_every:
+            progress_since_ckpt = 0
+            write_checkpoint(partial=True)
 
     # Build indexes from current catalogue only (drop ids that left the lists)
-    by_id: dict[str, str] = {}
-    by_title: dict[str, str] = {}
-    for g in groups:
-        ekey = g.get("resolved")
-        if not ekey:
-            continue
-        for ref in g["refs"]:
-            by_id[f"{ref['provider']}:{ref['type']}:{ref['id']}"] = ekey
-            by_title[title_key(ref["type"], ref["name"], ref["year"])] = ekey
-        # also the cleaned query
-        by_title[title_key(g["type"], g["query"], g["year"])] = ekey
+    by_id, by_title = build_indexes(groups)
 
-    # Drop misses that are no longer in the catalogue? keep them until TTL naturally ages; prune stale > 180d
-    pruned = {}
-    for k, m in misses.items():
-        if is_fresh(m, now, 180):
-            pruned[k] = m
-    misses = pruned
-
-    # Drop entries that nothing points at *and* are older than 180 days? Keep all still referenced; keep others for a while
-    referenced = set(by_id.values()) | set(by_title.values())
-    kept = {}
-    for k, e in entries.items():
-        if k in referenced or is_fresh(e, now, 180):
-            kept[k] = e
-    entries = kept
+    # Drop misses and entries that no longer appear in either provider's list.
+    # Only prune when every list arrived; a failed provider list must not wipe
+    # that provider's titles from the cache.
+    if not errors:
+        misses = prune_misses(misses, groups, now)
+        entries = prune_unreferenced_entries(entries, by_id, by_title)
+    else:
+        log("Mindestens eine Liste fehlte, daher wird diesmal nichts aus dem Cache entfernt.")
 
     stats = {
         "providers": sorted(catalogues.keys()),
@@ -747,11 +873,14 @@ def sync(data_dir: Path) -> int:
         "misses": new_misses,
         "skippedFresh": skipped,
         "tmdbCalls": tmdb.calls,
+        "partial": False,
+        "budgetStopped": budget_stopped,
     }
     log(
         f"Fertig: {stats['movies']} Filme, {stats['series']} Serien, "
         f"{stats['unmatched']} ohne Treffer, {tmdb.calls} TMDB-Aufrufe "
-        f"({new_hits} neu, {refreshed} aktualisiert, {skipped} unverändert)."
+        f"({new_hits} neu, {refreshed} aktualisiert, {skipped} unverändert"
+        f"{', Zeitbudget erreicht' if budget_stopped else ''})."
     )
 
     index_preview = {"byId": by_id, "byTitle": by_title, "misses": misses}
@@ -780,7 +909,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     import argparse
     p = argparse.ArgumentParser(description="PremiumTV TMDB metadata sync")
     p.add_argument("--data-dir", default=str(REPO_DIR / "data"), help="Output directory (default: repo data/)")
+    p.add_argument(
+        "--time-budget-min",
+        default=None,
+        help=f"Stop new TMDB lookups after this many minutes (default: env SYNC_TIME_BUDGET_MIN or {DEFAULT_TIME_BUDGET_MIN})",
+    )
+    p.add_argument(
+        "--checkpoint-every",
+        default=None,
+        help=f"Write meta/index every N new entries (default: env SYNC_CHECKPOINT_EVERY or {DEFAULT_CHECKPOINT_EVERY})",
+    )
     args = p.parse_args(argv)
+    if args.time_budget_min is not None:
+        os.environ["SYNC_TIME_BUDGET_MIN"] = str(args.time_budget_min)
+    if args.checkpoint_every is not None:
+        os.environ["SYNC_CHECKPOINT_EVERY"] = str(args.checkpoint_every)
     data_dir = Path(args.data_dir)
     try:
         return sync(data_dir)
