@@ -53,6 +53,10 @@ Wenn du vorerst nur einen Anbieter nutzt, reicht der jeweilige Block (`PTV_*` **
 
 Beim ersten Mal kann der Lauf länger dauern (viele neue Titel). Danach bleiben bekannte Einträge liegen, und es werden nur noch neue oder veraltete Titel bei TMDB abgefragt.
 
+Der Job hat bei GitHub ein Zeitlimit von 120 Minuten. Das Skript beendet neue TMDB-Abfragen nach 100 Minuten, schreibt den Zwischenstand und endet ohne Fehler, damit der Cache gespeichert wird. Zusätzlich wird alle 500 neuen Einträge zwischengespeichert. Der nächste Lauf macht bei den restlichen Titeln weiter.
+
+Titel, die bei keinem der Anbieter mehr in den Listen stehen, werden aus dem Cache entfernt.
+
 ## Hinweise
 
 - Das Repository ist öffentlich, damit die App die Dateien ohne Token lesen kann. Lege hier **keine** Passwörter oder API-Schlüssel in Dateien ab.
