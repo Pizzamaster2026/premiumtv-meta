@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -272,6 +273,62 @@ def test_prune_titles_gone_from_both_providers(base: str):
     mock_server.reset_catalogs()
 
 
+def test_xtream_base_normalizes_urls():
+    cases = {
+        "http://example.test:8080": "http://example.test:8080",
+        "http://example.test:8080/": "http://example.test:8080",
+        "  example.test:8080  ": "http://example.test:8080",
+        "example.test:8080/": "http://example.test:8080",
+        "example.test": "http://example.test",
+        "http://example.test:8080/player_api.php": "http://example.test:8080",
+        "http://example.test:8080/player_api.php?username=u&password=super-secret": "http://example.test:8080",
+        "http://example.test:8080/get.php?username=u": "http://example.test:8080",
+        "http://example.test:8080/panel_api.php": "http://example.test:8080",
+        "http://example.test:8080/xmltv.php": "http://example.test:8080",
+        "http://example.test:8080/ptv": "http://example.test:8080/ptv",
+        "http://example.test:8080/ptv/": "http://example.test:8080/ptv",
+        "http://example.test:8080/ptv/get.php": "http://example.test:8080/ptv",
+        "http://127.0.0.1:1234/ptv": "http://127.0.0.1:1234/ptv",
+        "https://example.test": "https://example.test",
+        "//example.test:8080": "http://example.test:8080",
+        "127.0.0.1:8080": "http://127.0.0.1:8080",
+        "http://[2001:db8::1]:8080/get.php": "http://[2001:db8::1]:8080",
+        "[2001:db8::1]:8080": "http://[2001:db8::1]:8080",
+        "host-no-dot:8080": "http://host-no-dot:8080",
+        "": "",
+    }
+    for raw, want in cases.items():
+        got = sync_meta.xtream_base(raw)
+        expect(f"xtream_base({raw!r})", got == want, f"got {got!r}, want {want!r}")
+        expect("no secret in base", "super-secret" not in got and "password=" not in got)
+
+    # List URL uses the normalized base and keeps a subpath.
+    url = sync_meta.xtream_list_url("example.test:8080/get.php?username=u&password=x", "u", "p", "get_vod_streams")
+    expect("list url scheme host", url.startswith("http://example.test:8080/player_api.php?"), url)
+    expect("list url action", "action=get_vod_streams" in url, url)
+
+
+def test_describe_http_error_masks_and_names_reason():
+    timed = urllib.error.URLError("timed out")
+    expect("timeout reason", sync_meta.describe_http_error(timed) == "URLError (timed out)")
+
+    refused = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    msg = sync_meta.describe_http_error(refused)
+    expect("refused type", "URLError" in msg and "ConnectionRefusedError" in msg, msg)
+
+    dns = urllib.error.URLError(OSError(-2, "Name or service not known"))
+    msg = sync_meta.describe_http_error(dns)
+    expect("dns type", "URLError" in msg and "Name or service not known" in msg, msg)
+
+    leaky = urllib.error.URLError("failed http://example.test/player_api.php?username=alice&password=super-secret")
+    msg = sync_meta.describe_http_error(leaky)
+    expect("password masked", "super-secret" not in msg and "alice" not in msg, msg)
+    expect("url stripped", "http://example.test" not in msg and "[url]" in msg, msg)
+
+    http_err = urllib.error.HTTPError("http://example.test/x", 503, "unavailable", hdrs=None, fp=None)
+    expect("http status", sync_meta.describe_http_error(http_err) == "HTTPError 503")
+
+
 def main():
     srv = mock_server.start(0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -282,6 +339,8 @@ def main():
 
     mock_server.reset_catalogs()
     tests = [
+        test_xtream_base_normalizes_urls,
+        test_describe_http_error_masks_and_names_reason,
         test_missing_secrets_exits_cleanly,
         test_missing_tmdb_key_only,
         lambda: test_full_sync_and_incremental(base),
@@ -292,6 +351,8 @@ def main():
         lambda: test_prune_titles_gone_from_both_providers(base),
     ]
     names = [
+        "test_xtream_base_normalizes_urls",
+        "test_describe_http_error_masks_and_names_reason",
         "test_missing_secrets_exits_cleanly",
         "test_missing_tmdb_key_only",
         "test_full_sync_and_incremental",
