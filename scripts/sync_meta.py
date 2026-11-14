@@ -37,9 +37,15 @@ OVERVIEW_MAX = 2000
 SHARD_BYTES = 8 * 1024 * 1024
 RATE_MAX = 40
 RATE_WINDOW_S = 10.0
-HTTP_TIMEOUT_LIST = 90
+HTTP_TIMEOUT_LIST = 120
 HTTP_TIMEOUT_TMDB = 25
-USER_AGENT = "premiumtv-meta-sync/1.0"
+HTTP_RETRIES = 4
+# Some Xtream panels ignore or stall on unknown clients; use a browser-like UA.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 # Leave headroom under the workflow's timeout-minutes: 120 so a partial
 # result can be written and committed before the job is killed.
 DEFAULT_TIME_BUDGET_MIN = 100
@@ -101,11 +107,40 @@ class RateLimiter:
         self._times.append(time.monotonic())
 
 
-def http_get_json(url: str, timeout: int, retries: int = 4) -> Any:
+def describe_http_error(exc: BaseException) -> str:
+    """Human-readable error for logs. Never includes credentials or full URLs."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTPError {exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            rmsg = str(reason).strip()
+            detail = f"{type(reason).__name__}: {rmsg}" if rmsg else type(reason).__name__
+        else:
+            detail = str(reason).strip() or "unknown"
+        detail = re.sub(r"(?i)(password|passwd|pwd|token|key|user(name)?)=[^&\s]+", r"\1=***", detail)
+        detail = re.sub(r"https?://[^\s]+", "[url]", detail)
+        return f"URLError ({detail})"
+    if isinstance(exc, TimeoutError):
+        msg = str(exc).strip()
+        return f"TimeoutError ({msg})" if msg else "TimeoutError"
+    if isinstance(exc, json.JSONDecodeError):
+        return "JSONDecodeError"
+    return type(exc).__name__
+
+
+def http_get_json(url: str, timeout: int, retries: int = HTTP_RETRIES) -> Any:
     """GET JSON. The URL must already be safe to log only via mask_url()."""
     last_err: Optional[Exception] = None
     for attempt in range(retries):
-        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+                "User-Agent": USER_AGENT,
+            },
+        )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
@@ -124,23 +159,54 @@ def http_get_json(url: str, timeout: int, retries: int = 4) -> Any:
                 time.sleep(min(wait, 60))
                 continue
             if e.code in (500, 502, 503, 504) and attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                wait = 2 ** attempt
+                log(f"  {describe_http_error(e)}, Versuch {attempt + 1}/{retries}, warte {wait}s …")
+                time.sleep(wait)
                 continue
             raise
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last_err = e
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                wait = 2 ** attempt
+                log(f"  {describe_http_error(e)}, Versuch {attempt + 1}/{retries}, warte {wait}s …")
+                time.sleep(wait)
                 continue
             raise
     raise last_err or RuntimeError("http_get_json failed")
 
 
+XTREAM_ENDPOINTS = ("player_api.php", "get.php", "panel_api.php", "xmltv.php")
+
+
 def xtream_base(url: str) -> str:
-    u = (url or "").strip().rstrip("/")
-    if u.endswith("/player_api.php"):
-        u = u[: -len("/player_api.php")]
-    return u
+    """Normalize an Xtream base URL.
+
+    Accepts a bare host:port, a trailing slash, or a full player_api.php / get.php
+    (or panel_api.php / xmltv.php) URL including a query string. Subpaths such as
+    /ptv are kept. Query strings are dropped so credentials never stay in the base.
+    A missing scheme defaults to http://, which is the usual Xtream panel setup.
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if u.startswith("//"):
+        u = "http:" + u
+    else:
+        parsed = urllib.parse.urlparse(u)
+        if not (parsed.scheme in ("http", "https") and parsed.netloc):
+            u = "http://" + u
+
+    p = urllib.parse.urlparse(u)
+    path = p.path or ""
+    leaf = path.rsplit("/", 1)[-1].lower()
+    if leaf in XTREAM_ENDPOINTS or any(leaf.startswith(ep) for ep in XTREAM_ENDPOINTS):
+        path = path[: len(path) - len(path.rsplit("/", 1)[-1])].rstrip("/")
+    path = path.rstrip("/")
+    scheme = p.scheme if p.scheme in ("http", "https") else "http"
+    netloc = p.netloc
+    if not netloc:
+        return ""
+    return f"{scheme}://{netloc}{path}"
 
 
 def xtream_list_url(base: str, user: str, password: str, action: str) -> str:
@@ -159,7 +225,9 @@ def fetch_xtream_list(base: str, user: str, password: str, action: str) -> list:
     try:
         data = http_get_json(url, timeout=HTTP_TIMEOUT_LIST)
     except Exception as e:
-        raise RuntimeError(f"Liste {action} von {mask_url(url)} fehlgeschlagen: {type(e).__name__}") from e
+        raise RuntimeError(
+            f"Liste {action} von {mask_url(url)} fehlgeschlagen: {describe_http_error(e)}"
+        ) from e
     if isinstance(data, dict):
         # Typical error envelope: {"user_info": {"auth": 0, ...}}
         info = data.get("user_info") if isinstance(data.get("user_info"), dict) else {}
