@@ -1,0 +1,54 @@
+name: Sync TMDB-Metadaten
+
+# 02:00 UTC = 03:00 Europe/Berlin im Winter (MEZ, UTC+1)
+#           = 04:00 Europe/Berlin im Sommer (MESZ, UTC+2)
+# GitHub-Cron kennt keine Zeitzonen, daher dieser Kompromiss.
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-meta
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Metadaten abgleichen
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          PTV_URL: ${{ secrets.PTV_URL }}
+          PTV_USER: ${{ secrets.PTV_USER }}
+          PTV_PASS: ${{ secrets.PTV_PASS }}
+          ONE_URL: ${{ secrets.ONE_URL }}
+          ONE_USER: ${{ secrets.ONE_USER }}
+          ONE_PASS: ${{ secrets.ONE_PASS }}
+        run: python3 scripts/sync_meta.py --data-dir data
+
+      - name: Änderungen übernehmen
+        run: |
+          rm -f data/.changed
+          git add data/index.json data/meta.json data/meta-*.json 2>/dev/null || true
+          git add -u data/
+          if git diff --cached --quiet; then
+            echo "Keine Änderungen am Cache."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: TMDB-Metadaten aktualisieren"
+          git push
