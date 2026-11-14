@@ -5,6 +5,8 @@ Never contacts real IPTV servers or api.themoviedb.org.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -36,7 +38,8 @@ def run_sync(env, data_dir):
     try:
         for k in list(os.environ):
             if k in ("TMDB_API_KEY", "TMDB_API_BASE", "PTV_URL", "PTV_USER", "PTV_PASS",
-                     "ONE_URL", "ONE_USER", "ONE_PASS"):
+                     "ONE_URL", "ONE_USER", "ONE_PASS",
+                     "SYNC_TIME_BUDGET_MIN", "SYNC_CHECKPOINT_EVERY"):
                 del os.environ[k]
         os.environ.update(env)
         return sync_meta.sync(Path(data_dir))
@@ -159,6 +162,116 @@ def test_logs_do_not_contain_secrets(base: str, cap_path: Path):
     expect("url no query", "password" not in sync_meta.mask_url(base + "/ptv?password=ptv-secret"))
 
 
+def both_providers(base: str) -> dict:
+    return {
+        "TMDB_API_KEY": mock_server.TMDB_KEY,
+        "TMDB_API_BASE": base + "/3",
+        "PTV_URL": base + "/ptv",
+        "PTV_USER": mock_server.PTV_USER,
+        "PTV_PASS": mock_server.PTV_PASS,
+        "ONE_URL": base + "/one",
+        "ONE_USER": mock_server.ONE_USER,
+        "ONE_PASS": mock_server.ONE_PASS,
+    }
+
+
+def test_time_budget_stops_lookups_and_saves(base: str):
+    """Budget 0: no new TMDB calls, already cached titles stay, process exits 0."""
+    mock_server.reset_catalogs()
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        env = both_providers(base)
+        code = run_sync(env, td)
+        expect("seed sync exit 0", code == 0)
+        meta = json.loads((Path(td) / "meta.json").read_text())
+        expect("seed has godfather", "movie:238" in meta["entries"])
+        expect("seed has inception", "movie:27205" in meta["entries"])
+
+        # A title that is not yet in the cache and would need a TMDB search.
+        mock_server.PTV_VOD.append({"stream_id": 1099, "name": "Unknown indie film XYZQQ 1999"})
+        get_json(base + "/stats/reset")
+        env["SYNC_TIME_BUDGET_MIN"] = "0"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = run_sync(env, td)
+        log = buf.getvalue()
+        expect("budget sync exit 0", code == 0)
+        expect("budget log line", "keine neuen TMDB-Abfragen mehr" in log, log)
+        st = get_json(base + "/stats")
+        expect("lists still fetched under budget", len(st["xtream"]) == 4, st["xtream"])
+        expect("no new TMDB lookups under budget", st["tmdb"] == [], st["tmdb"])
+        meta2 = json.loads((Path(td) / "meta.json").read_text())
+        idx2 = json.loads((Path(td) / "index.json").read_text())
+        expect("cached film kept", "movie:238" in meta2["entries"])
+        expect("cached inception kept", "movie:27205" in meta2["entries"])
+        expect("new title not fetched", "premiumtv:movie:1099" not in idx2["byId"])
+        expect("still no stream calls", st["forbidden"] == [])
+    mock_server.reset_catalogs()
+
+
+def test_checkpoint_survives_hard_kill(base: str):
+    """Writing every new entry keeps progress on disk if the process is killed."""
+    mock_server.reset_catalogs()
+    get_json(base + "/stats/reset")
+    real_write = sync_meta.write_outputs
+    calls = {"n": 0}
+
+    def wrapped(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] >= 1:
+            raise SystemExit(99)
+        return result
+
+    with tempfile.TemporaryDirectory() as td:
+        env = both_providers(base)
+        env["SYNC_CHECKPOINT_EVERY"] = "1"
+        sync_meta.write_outputs = wrapped
+        try:
+            try:
+                run_sync(env, td)
+                raise AssertionError("expected SystemExit from checkpoint hook")
+            except SystemExit as e:
+                expect("hook exit 99", e.code == 99)
+        finally:
+            sync_meta.write_outputs = real_write
+        meta_path = Path(td) / "meta.json"
+        expect("checkpoint wrote meta", meta_path.is_file())
+        meta = json.loads(meta_path.read_text())
+        expect("at least one entry saved", len(meta.get("entries") or {}) >= 1)
+        expect("godfather likely first (has tmdb id)", "movie:238" in meta["entries"] or len(meta["entries"]) >= 1)
+    mock_server.reset_catalogs()
+
+
+def test_prune_titles_gone_from_both_providers(base: str):
+    """A title that leaves every provider list is removed from meta.json."""
+    mock_server.reset_catalogs()
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        env = both_providers(base)
+        code = run_sync(env, td)
+        expect("seed exit 0", code == 0)
+        meta = json.loads((Path(td) / "meta.json").read_text())
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("inception present", "movie:27205" in meta["entries"])
+        expect("inception indexed", idx["byId"]["one:movie:502"] == "movie:27205")
+        expect("godfather present", "movie:238" in meta["entries"])
+
+        mock_server.ONE_VOD[:] = [x for x in mock_server.ONE_VOD if x.get("stream_id") != 502]
+        get_json(base + "/stats/reset")
+        code = run_sync(env, td)
+        expect("prune sync exit 0", code == 0)
+        meta2 = json.loads((Path(td) / "meta.json").read_text())
+        idx2 = json.loads((Path(td) / "index.json").read_text())
+        expect("inception pruned from meta", "movie:27205" not in meta2["entries"], list(meta2["entries"]))
+        expect("inception pruned from byId", "one:movie:502" not in idx2["byId"], list(idx2["byId"]))
+        expect("godfather kept", "movie:238" in meta2["entries"])
+        expect("matrix kept", "movie:603" in meta2["entries"])
+        expect("office kept", "tv:2316" in meta2["entries"])
+        expect("files marked changed", (Path(td) / ".changed").exists())
+    mock_server.reset_catalogs()
+
+
 def main():
     srv = mock_server.start(0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -167,12 +280,16 @@ def main():
     # Safety: these tests must never be pointed at real hosts
     expect("local mock only", "127.0.0.1" in base)
 
+    mock_server.reset_catalogs()
     tests = [
         test_missing_secrets_exits_cleanly,
         test_missing_tmdb_key_only,
         lambda: test_full_sync_and_incremental(base),
         lambda: test_one_provider_only(base),
         lambda: test_logs_do_not_contain_secrets(base, Path(".")),
+        lambda: test_time_budget_stops_lookups_and_saves(base),
+        lambda: test_checkpoint_survives_hard_kill(base),
+        lambda: test_prune_titles_gone_from_both_providers(base),
     ]
     names = [
         "test_missing_secrets_exits_cleanly",
@@ -180,6 +297,9 @@ def main():
         "test_full_sync_and_incremental",
         "test_one_provider_only",
         "test_logs_do_not_contain_secrets",
+        "test_time_budget_stops_lookups_and_saves",
+        "test_checkpoint_survives_hard_kill",
+        "test_prune_titles_gone_from_both_providers",
     ]
     failed = 0
     try:

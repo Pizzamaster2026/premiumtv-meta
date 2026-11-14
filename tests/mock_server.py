@@ -93,6 +93,19 @@ SEARCH_TV = {
     "the office": [2316],
 }
 
+# Mutable catalogue snapshots so tests can drop titles and restore them.
+_PTV_VOD0 = [dict(x) for x in PTV_VOD]
+_PTV_SERIES0 = [dict(x) for x in PTV_SERIES]
+_ONE_VOD0 = [dict(x) for x in ONE_VOD]
+_ONE_SERIES0 = [dict(x) for x in ONE_SERIES]
+
+
+def reset_catalogs() -> None:
+    PTV_VOD[:] = [dict(x) for x in _PTV_VOD0]
+    PTV_SERIES[:] = [dict(x) for x in _PTV_SERIES0]
+    ONE_VOD[:] = [dict(x) for x in _ONE_VOD0]
+    ONE_SERIES[:] = [dict(x) for x in _ONE_SERIES0]
+
 
 class Stats:
     def __init__(self):
