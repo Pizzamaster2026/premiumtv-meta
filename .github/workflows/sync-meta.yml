@@ -54,6 +54,9 @@ jobs:
           # stream URLs). If that file is at most this many days old, the
           # server is not contacted for PremiumTV at all.
           SYNC_TITLES_MAX_AGE_DAYS: "7"
+          # data/sport.json is built by its own workflow (sync-sport.yml,
+          # every 6 h), so the two jobs never push the same file.
+          SYNC_SPORT: "0"
         run: python3 scripts/sync_meta.py --data-dir data
 
       # always(): also run after a timeout/cancel, so a mid-run checkpoint

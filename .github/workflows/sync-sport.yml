@@ -1,0 +1,51 @@
+name: Sportplan aktualisieren
+
+# Every 6 hours (UTC). One xmltv.php request, no TMDB, no list fetch.
+# Keeps data/sport.json younger than the player's 36 h limit even if the
+# nightly TMDB sync is slow or skipped.
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-sport
+  cancel-in-progress: true
+
+jobs:
+  sport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sportplan bauen
+        env:
+          ONE_URL: ${{ secrets.ONE_URL }}
+          ONE_USER: ${{ secrets.ONE_USER }}
+          ONE_PASS: ${{ secrets.ONE_PASS }}
+          SYNC_SPORT_DAYS: "3"
+          SYNC_SPORT_BUDGET_SEC: "300"
+        run: python3 scripts/sync_meta.py --data-dir data --sport-only
+
+      - name: Änderungen übernehmen
+        run: |
+          git add data/sport.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Kein neuer Sportplan."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: Sportplan aktualisieren"
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+          git push
