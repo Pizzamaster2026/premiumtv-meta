@@ -25,6 +25,8 @@ ONE_VOD = [
 ]
 ONE_SERIES = [
     {"series_id": 801, "name": "The Office", "year": "2005"},
+    # Some live panels omit series_id and only send `id`.
+    {"id": 802, "name": "Sherlock", "year": "2010"},
 ]
 
 MOVIES = {
@@ -81,6 +83,16 @@ TV = {
             {"id": 17647, "name": "Steve Carell", "character": "Michael Scott", "profile_path": "/steve.jpg", "order": 0},
         ]},
     },
+    19885: {
+        "id": 19885, "name": "Sherlock", "original_name": "Sherlock",
+        "first_air_date": "2010-07-25", "vote_average": 8.4, "vote_count": 5000,
+        "overview": "Holmes …", "episode_run_time": [90],
+        "poster_path": "/sherlock.jpg", "backdrop_path": "/sherlock-bg.jpg",
+        "genres": [{"id": 80, "name": "Krimi"}],
+        "credits": {"cast": [
+            {"id": 71580, "name": "Benedict Cumberbatch", "character": "Sherlock Holmes", "profile_path": "/bc.jpg", "order": 0},
+        ]},
+    },
 }
 
 SEARCH_MOVIE = {
@@ -91,6 +103,7 @@ SEARCH_MOVIE = {
 SEARCH_TV = {
     "breaking bad": [1396],
     "the office": [2316],
+    "sherlock": [19885],
 }
 
 # Mutable catalogue snapshots so tests can drop titles and restore them.

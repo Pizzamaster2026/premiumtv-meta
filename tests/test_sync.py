@@ -39,8 +39,7 @@ def run_sync(env, data_dir):
     try:
         for k in list(os.environ):
             if k in ("TMDB_API_KEY", "TMDB_API_BASE", "PTV_URL", "PTV_USER", "PTV_PASS",
-                     "ONE_URL", "ONE_USER", "ONE_PASS",
-                     "SYNC_TIME_BUDGET_MIN", "SYNC_CHECKPOINT_EVERY"):
+                     "ONE_URL", "ONE_USER", "ONE_PASS") or k.startswith("SYNC_"):
                 del os.environ[k]
         os.environ.update(env)
         return sync_meta.sync(Path(data_dir))
@@ -102,8 +101,11 @@ def test_full_sync_and_incremental(base: str):
         expect("inception via search", idx["byId"]["one:movie:502"] == "movie:27205")
         expect("breaking bad", idx["byId"]["premiumtv:series:2001"] == "tv:1396")
         expect("the office", idx["byId"]["one:series:801"] == "tv:2316")
+        expect("sherlock via id field", idx["byId"]["one:series:802"] == "tv:19885")
+        expect("stats count series", idx["stats"]["series"] >= 3, idx["stats"])
         expect("unmatched recorded", "movie|unknown indie film xyzqq|1998" in idx["misses"])
         expect("series runtime", meta["entries"]["tv:1396"]["runtime"] == 47)
+        expect("sherlock stored as tv", "tv:19885" in meta["entries"])
 
         st = get_json(base + "/stats")
         expect("only list actions", all(x["action"] in ("get_vod_streams", "get_series") for x in st["xtream"]))
@@ -329,6 +331,126 @@ def test_describe_http_error_masks_and_names_reason():
     expect("http status", sync_meta.describe_http_error(http_err) == "HTTPError 503")
 
 
+def test_item_id_accepts_panel_fallbacks():
+    expect("series_id preferred", sync_meta.item_id({"series_id": 2001, "id": 9}, "series") == "2001")
+    expect("series id fallback", sync_meta.item_id({"id": 802, "name": "Sherlock"}, "series") == "802")
+    expect("series stream_id fallback", sync_meta.item_id({"stream_id": 77}, "series") == "77")
+    expect("movie stream_id preferred", sync_meta.item_id({"stream_id": 501, "id": 1}, "movie") == "501")
+    expect("movie id fallback", sync_meta.item_id({"id": 501}, "movie") == "501")
+    expect("movie vod_id fallback", sync_meta.item_id({"vod_id": 88}, "movie") == "88")
+    expect("empty without ids", sync_meta.item_id({"name": "X"}, "series") == "")
+
+
+def test_collect_titles_keeps_series_with_id_only():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        groups = sync_meta.collect_titles({
+            "one": {
+                "movie": [{"stream_id": 1, "name": "Der Pate (1972)"}],
+                "series": [{"id": 802, "name": "Sherlock", "year": "2010"}],
+            }
+        })
+    log = buf.getvalue()
+    types = [g["type"] for g in groups]
+    expect("both types collected", types.count("movie") == 1 and types.count("series") == 1, types)
+    series = next(g for g in groups if g["type"] == "series")
+    expect("series ref id", series["refs"][0]["id"] == "802" and series["refs"][0]["provider"] == "one")
+    expect("log names fields", "Felder:" in log and "id" in log, log)
+    expect("log counts series", "1 Filme, 1 Serien" in log, log)
+    expect("no skip for id-only series", "ohne ID" not in log, log)
+
+
+def test_collect_titles_logs_when_series_id_missing():
+    """If a panel field is unknown, the skip counter must show it (the previous 0-series symptom)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        groups = sync_meta.collect_titles({
+            "one": {
+                "movie": [],
+                "series": [{"name": "Sherlock", "year": "2010", "cover": "x.jpg"}],
+            }
+        })
+    log = buf.getvalue()
+    expect("no series groups", all(g["type"] != "series" for g in groups), groups)
+    expect("skipped without id", "1 ohne ID" in log, log)
+
+
+def test_interleave_by_type_does_not_starve_series():
+    movies = [{"type": "movie", "n": i} for i in range(5)]
+    series = [{"type": "series", "n": i} for i in range(2)]
+    out = sync_meta.interleave_by_type(movies + series)
+    expect("order", [g["type"] for g in out] == [
+        "movie", "series", "movie", "series", "movie", "movie", "movie"
+    ], [g["type"] for g in out])
+    expect("same length", len(out) == 7)
+
+
+def test_list_timeout_env_per_provider():
+    old = {k: os.environ.get(k) for k in list(os.environ) if k.startswith("SYNC_")}
+    try:
+        for k in list(old):
+            del os.environ[k]
+        expect("default timeout", sync_meta.list_timeout_sec("one") == 300)
+        expect("default retries", sync_meta.list_retries("premiumtv") == 2)
+        os.environ["SYNC_LIST_TIMEOUT_SEC"] = "400"
+        os.environ["SYNC_LIST_TIMEOUT_PREMIUMTV_SEC"] = "600"
+        os.environ["SYNC_LIST_RETRIES"] = "3"
+        os.environ["SYNC_LIST_RETRIES_ONE"] = "1"
+        expect("shared timeout", sync_meta.list_timeout_sec("one") == 400)
+        expect("provider timeout", sync_meta.list_timeout_sec("premiumtv") == 600)
+        expect("shared retries", sync_meta.list_retries("premiumtv") == 3)
+        expect("provider retries", sync_meta.list_retries("one") == 1)
+    finally:
+        for k in list(os.environ):
+            if k.startswith("SYNC_"):
+                del os.environ[k]
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_tmdb_budget_shrinks_after_slow_lists():
+    old = {k: os.environ.get(k) for k in list(os.environ) if k.startswith("SYNC_")}
+    try:
+        for k in list(old):
+            del os.environ[k]
+        # 1 minute of list fetching: leftover 120-1-12=107, capped at 100
+        minutes, sec = sync_meta.tmdb_budget_after(60)
+        expect("cap still 100 after short lists", minutes == 100 and sec == 100 * 60, minutes)
+        # 25 minutes of list fetching: leftover 120-25-12=83
+        minutes, sec = sync_meta.tmdb_budget_after(25 * 60)
+        expect("shrinks after slow lists", minutes == 83 and sec == 83 * 60, minutes)
+        # Almost no time left
+        minutes, sec = sync_meta.tmdb_budget_after(115 * 60)
+        expect("zero when margin exhausted", minutes == 0 and sec == 0, minutes)
+        os.environ["SYNC_JOB_TIMEOUT_MIN"] = "120"
+        os.environ["SYNC_JOB_MARGIN_MIN"] = "10"
+        os.environ["SYNC_TIME_BUDGET_MIN"] = "50"
+        minutes, _ = sync_meta.tmdb_budget_after(20 * 60)
+        expect("cap can be lower than leftover", minutes == 50, minutes)
+    finally:
+        for k in list(os.environ):
+            if k.startswith("SYNC_"):
+                del os.environ[k]
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_list_fetch_logs_status_size_time(base: str):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        items = sync_meta.fetch_xtream_list(
+            base + "/one", mock_server.ONE_USER, mock_server.ONE_PASS, "get_series", timeout=5, retries=1
+        )
+    log = buf.getvalue()
+    expect("got series rows", isinstance(items, list) and len(items) >= 2, items)
+    expect("http status logged", "Antwort HTTP 200" in log, log)
+    expect("size logged", "Bytes" in log, log)
+    expect("time logged", "s)" in log or " in " in log, log)
+    expect("no password in log", mock_server.ONE_PASS not in log, log)
+
+
 def main():
     srv = mock_server.start(0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -341,6 +463,12 @@ def main():
     tests = [
         test_xtream_base_normalizes_urls,
         test_describe_http_error_masks_and_names_reason,
+        test_item_id_accepts_panel_fallbacks,
+        test_collect_titles_keeps_series_with_id_only,
+        test_collect_titles_logs_when_series_id_missing,
+        test_interleave_by_type_does_not_starve_series,
+        test_list_timeout_env_per_provider,
+        test_tmdb_budget_shrinks_after_slow_lists,
         test_missing_secrets_exits_cleanly,
         test_missing_tmdb_key_only,
         lambda: test_full_sync_and_incremental(base),
@@ -349,10 +477,17 @@ def main():
         lambda: test_time_budget_stops_lookups_and_saves(base),
         lambda: test_checkpoint_survives_hard_kill(base),
         lambda: test_prune_titles_gone_from_both_providers(base),
+        lambda: test_list_fetch_logs_status_size_time(base),
     ]
     names = [
         "test_xtream_base_normalizes_urls",
         "test_describe_http_error_masks_and_names_reason",
+        "test_item_id_accepts_panel_fallbacks",
+        "test_collect_titles_keeps_series_with_id_only",
+        "test_collect_titles_logs_when_series_id_missing",
+        "test_interleave_by_type_does_not_starve_series",
+        "test_list_timeout_env_per_provider",
+        "test_tmdb_budget_shrinks_after_slow_lists",
         "test_missing_secrets_exits_cleanly",
         "test_missing_tmdb_key_only",
         "test_full_sync_and_incremental",
@@ -361,6 +496,7 @@ def main():
         "test_time_budget_stops_lookups_and_saves",
         "test_checkpoint_survives_hard_kill",
         "test_prune_titles_gone_from_both_providers",
+        "test_list_fetch_logs_status_size_time",
     ]
     failed = 0
     try:
