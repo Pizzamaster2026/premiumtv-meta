@@ -57,6 +57,31 @@ Der Job hat bei GitHub ein Zeitlimit von 120 Minuten. Das Skript holt die große
 
 Titel, die bei keinem der Anbieter mehr in den Listen stehen, werden aus dem Cache entfernt.
 
+## PremiumTV-Titel aus der Manager-App
+
+Der PremiumTV-Server blockiert die Rechner von GitHub (Verbindung läuft in einen Timeout). Deshalb lädt die **PremiumTV Manager**-App (ab 1.5.45) die Titellisten über das Handy und legt nur eine verkleinerte Liste hier ab:
+
+- Datei: `data/titles_premiumtv.json.gz` (gzip-komprimiertes JSON)
+- Inhalt pro Titel nur: `id`, `name`, `year`, `tmdb` (falls der Anbieter eine TMDB-ID mitliefert), `cat` (Kategorie-ID). **Keine** Zugangsdaten, **keine** Stream-Links.
+
+```json
+{"format":"premiumtv-titles","version":1,"provider":"premiumtv",
+ "generatedAt":"2026-11-15T12:00:00Z","app":"de.premiumtv.manager 1.5.45",
+ "counts":{"movie":1,"series":1},
+ "movie":[{"id":"1001","name":"DE - Der Pate (1972) 4K","year":"1972","tmdb":238,"cat":"12"}],
+ "series":[{"id":"2001","name":"Breaking Bad (2008)","year":"2008","cat":"5"}]}
+```
+
+So nutzt der nächtliche Job die Datei:
+
+1. Ist die Datei höchstens **7 Tage** alt (`generatedAt`, änderbar über `SYNC_TITLES_MAX_AGE_DAYS` bzw. `SYNC_TITLES_MAX_AGE_DAYS_PREMIUMTV`), wird der PremiumTV-Server **gar nicht** abgefragt.
+2. Ist sie älter, versucht der Job den Server. Klappt das nicht, nimmt er die alte Datei und entfernt diesmal nichts aus dem Cache.
+3. Im Protokoll steht pro Anbieter `Quelle Titeldatei … (Alter x Tage …)` oder `Quelle Server …`, in `data/index.json` unter `stats.sources`.
+
+Die PTV-Secrets können bleiben; sie werden nur noch gebraucht, wenn die Datei fehlt oder zu alt ist.
+
+**Token für die App:** Ein Fine-grained Token mit Zugriff nur auf `premiumtv-meta` und den Rechten **Contents: Read and write** (zum Hochladen der Datei) und **Actions: Read and write** (für „Jetzt abgleichen“). Ein klassisches Token braucht `repo` (bzw. `public_repo`) und `workflow`.
+
 ## Hinweise
 
 - Das Repository ist öffentlich, damit die App die Dateien ohne Token lesen kann. Lege hier **keine** Passwörter oder API-Schlüssel in Dateien ab.
