@@ -1,10 +1,16 @@
 """Local mock Xtream list API + mock TMDB. No upstream network."""
 from __future__ import annotations
 
+import gzip
 import json
+import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+
+XMLTV_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "xmltv_sport.xml"
+XMLTV = {"mode": "ok"}
 
 PTV_USER, PTV_PASS = "ptv-test", "ptv-secret"
 ONE_USER, ONE_PASS = "one-test", "one-secret"
@@ -128,6 +134,7 @@ class Stats:
         self.xtream = []
         self.tmdb = []
         self.forbidden = []
+        self.xmltv = []
 
 
 STATS = Stats()
@@ -170,11 +177,14 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/player_api.php") or path.endswith("/player_api.php/"):
             self._xtream(path, q)
             return
+        if path.endswith("/xmltv.php"):
+            self._xmltv(path, q)
+            return
         if path.startswith("/3/") or path.startswith("/tmdb/3/"):
             self._tmdb(path, q)
             return
         if path == "/stats":
-            _json(self, 200, {"xtream": STATS.xtream, "tmdb": STATS.tmdb, "forbidden": STATS.forbidden})
+            _json(self, 200, {"xtream": STATS.xtream, "tmdb": STATS.tmdb, "forbidden": STATS.forbidden, "xmltv": STATS.xmltv})
             return
         if path == "/stats/reset":
             STATS.reset()
@@ -198,6 +208,33 @@ class Handler(BaseHTTPRequestHandler):
             return
         STATS.forbidden.append(self.path)
         _json(self, 400, {"error": f"unexpected action {action}"})
+
+    def _xmltv(self, path, q):
+        """EPG fixture for the optional sport.json step (One only). XMLTV_MODE: ok | 404 | slow | garbage | gzip."""
+        provider = "one" if "/one/" in path or path.startswith("/one") else "ptv"
+        STATS.xmltv.append({"provider": provider})
+        if (q.get("username"), q.get("password")) != (ONE_USER, ONE_PASS) or XMLTV["mode"] == "404":
+            _json(self, 404, {"error": "no epg"})
+            return
+        body = XMLTV_FIXTURE.read_bytes()
+        if XMLTV["mode"] == "garbage":
+            body = b"<html>blocked</html>"
+        headers = {"Content-Type": "application/xml"}
+        if XMLTV["mode"] == "gzip":
+            body = gzip.compress(body)
+            headers["Content-Encoding"] = "gzip"
+        self.send_response(200)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if XMLTV["mode"] == "slow":
+            for i in range(0, len(body), 64):
+                self.wfile.write(body[i:i + 64])
+                self.wfile.flush()
+                time.sleep(0.2)
+            return
+        self.wfile.write(body)
 
     def _tmdb(self, path, q):
         key = q.get("api_key", "")
