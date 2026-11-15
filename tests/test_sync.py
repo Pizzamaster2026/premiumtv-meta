@@ -6,6 +6,7 @@ Never contacts real IPTV servers or api.themoviedb.org.
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -451,6 +453,185 @@ def test_list_fetch_logs_status_size_time(base: str):
     expect("no password in log", mock_server.ONE_PASS not in log, log)
 
 
+# ---------------------------------------------------------------------------
+# Titles file uploaded by the Manager app (data/titles_premiumtv.json.gz)
+# ---------------------------------------------------------------------------
+
+def _iso(dt):
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def write_titles_file(data_dir, provider="premiumtv", age_days=0.5, movie=None, series=None, extra=None):
+    now = datetime.now(timezone.utc)
+    doc = {
+        "format": "premiumtv-titles",
+        "version": 1,
+        "provider": provider,
+        "generatedAt": _iso(now - timedelta(days=age_days)),
+        "app": "de.premiumtv.manager 1.5.45",
+        "movie": movie if movie is not None else [
+            {"id": "1001", "name": "DE - Der Pate (1972) 4K", "year": "1972", "tmdb": 238, "cat": "12"},
+            {"id": "1002", "name": "| DE | The Matrix - 1999", "year": "1999"},
+        ],
+        "series": series if series is not None else [
+            {"id": "2001", "name": "Breaking Bad (US) (2008)", "tmdb": "1396"},
+        ],
+    }
+    if extra:
+        doc.update(extra)
+    doc["counts"] = {"movie": len(doc["movie"]), "series": len(doc["series"])}
+    path = Path(data_dir) / f"titles_{provider}.json.gz"
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wb") as fh:
+        fh.write(json.dumps(doc).encode("utf-8"))
+    return path
+
+
+def run_sync_captured(env, data_dir):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = run_sync(env, data_dir)
+    return code, buf.getvalue()
+
+
+def test_fresh_titles_file_skips_ptv_server(base: str):
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        write_titles_file(td, age_days=1)
+        code, out = run_sync_captured(both_providers(base), td)
+        expect("exit 0", code == 0, out)
+        st = get_json(base + "/stats")
+        expect("ptv server not contacted", {x["provider"] for x in st["xtream"]} == {"one"}, st["xtream"])
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("ptv movie from file", idx["byId"].get("premiumtv:movie:1001") == "movie:238", idx["byId"])
+        expect("ptv matrix from file", idx["byId"].get("premiumtv:movie:1002") == "movie:603", idx["byId"])
+        expect("ptv series from file", idx["byId"].get("premiumtv:series:2001") == "tv:1396", idx["byId"])
+        expect("one still live", idx["byId"].get("one:movie:502") == "movie:27205", idx["byId"])
+        expect("source logged", "Quelle Titeldatei titles_premiumtv.json.gz" in out, out)
+        expect("age logged", "Alter 1.0 Tage" in out, out)
+        expect("source in stats", idx["stats"]["sources"]["premiumtv"]["source"] == "titles-file", idx["stats"])
+        expect("one source server", idx["stats"]["sources"]["one"]["source"] == "server", idx["stats"])
+        expect("no secrets in log", mock_server.PTV_PASS not in out and mock_server.ONE_PASS not in out)
+
+
+def test_titles_file_without_ptv_secrets(base: str):
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        write_titles_file(td, age_days=0)
+        env = {k: v for k, v in both_providers(base).items() if not k.startswith("PTV_")}
+        code, out = run_sync_captured(env, td)
+        expect("exit 0", code == 0, out)
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("ptv ids present", idx["byId"].get("premiumtv:series:2001") == "tv:1396", idx["byId"])
+        expect("providers stat", idx["stats"]["providers"] == ["one", "premiumtv"], idx["stats"])
+
+
+def test_titles_file_only_no_logins_at_all(base: str):
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        write_titles_file(td, age_days=0)
+        env = {"TMDB_API_KEY": mock_server.TMDB_KEY, "TMDB_API_BASE": base + "/3"}
+        code, out = run_sync_captured(env, td)
+        expect("exit 0", code == 0, out)
+        expect("not treated as missing secrets", "kein Anbieter-Zugang" not in out, out)
+        st = get_json(base + "/stats")
+        expect("no xtream calls", st["xtream"] == [], st["xtream"])
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("only ptv ids", all(k.startswith("premiumtv:") for k in idx["byId"]), list(idx["byId"]))
+
+
+def test_stale_titles_file_uses_live_server_when_reachable(base: str):
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        write_titles_file(td, age_days=9, movie=[{"id": "9999", "name": "Nur In Alter Datei"}], series=[])
+        code, out = run_sync_captured(both_providers(base), td)
+        expect("exit 0", code == 0, out)
+        st = get_json(base + "/stats")
+        expect("ptv server contacted", "ptv" in {x["provider"] for x in st["xtream"]}, st["xtream"])
+        expect("stale logged", "Titeldatei ist zu alt" in out and "Alter 9.0 Tage" in out, out)
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("live ptv ids", "premiumtv:movie:1001" in idx["byId"], idx["byId"])
+        expect("stale file ignored", "premiumtv:movie:9999" not in idx["byId"], idx["byId"])
+        expect("source server", idx["stats"]["sources"]["premiumtv"]["source"] == "server", idx["stats"])
+
+
+def test_stale_titles_file_fallback_when_server_unreachable(base: str):
+    get_json(base + "/stats/reset")
+    with tempfile.TemporaryDirectory() as td:
+        env = both_providers(base)
+        # First a full run so the cache contains entries that must not be pruned.
+        code, _ = run_sync_captured(env, td)
+        expect("seed exit 0", code == 0)
+        write_titles_file(td, age_days=10, movie=[{"id": "1001", "name": "DE - Der Pate (1972) 4K", "year": "1972"}], series=[])
+        env = dict(env)
+        env["PTV_URL"] = "http://127.0.0.1:9"  # closed local port -> connection refused
+        env["SYNC_LIST_TIMEOUT_PREMIUMTV_SEC"] = "2"
+        env["SYNC_LIST_RETRIES_PREMIUMTV"] = "1"
+        code, out = run_sync_captured(env, td)
+        expect("exit 0", code == 0, out)
+        expect("fallback logged", "nutze stattdessen die alte Titeldatei" in out, out)
+        expect("no prune logged", "nichts aus dem Cache entfernt" in out, out)
+        meta = json.loads((Path(td) / "meta.json").read_text())
+        expect("breaking bad kept (no prune)", "tv:1396" in meta["entries"], list(meta["entries"]))
+        expect("matrix kept (no prune)", "movie:603" in meta["entries"], list(meta["entries"]))
+        idx = json.loads((Path(td) / "index.json").read_text())
+        expect("ptv id from stale file", idx["byId"].get("premiumtv:movie:1001") == "movie:238", idx["byId"])
+
+
+def test_titles_age_limit_env():
+    with tempfile.TemporaryDirectory() as td:
+        write_titles_file(td, age_days=3)
+        old = dict(os.environ)
+        try:
+            os.environ["SYNC_TITLES_MAX_AGE_DAYS"] = "2"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _l, _i, status = sync_meta.try_titles_file(Path(td), "premiumtv", datetime.now(timezone.utc))
+            expect("stale with 2 day limit", status == "stale", status)
+            os.environ["SYNC_TITLES_MAX_AGE_DAYS_PREMIUMTV"] = "5"
+            with contextlib.redirect_stdout(buf):
+                _l, _i, status = sync_meta.try_titles_file(Path(td), "premiumtv", datetime.now(timezone.utc))
+            expect("fresh with per-provider 5 day limit", status == "fresh", status)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+
+def test_titles_file_rejects_bad_input():
+    now = datetime.now(timezone.utc)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            expect("missing", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "missing")
+            (d / "titles_premiumtv.json.gz").write_bytes(b"not gzip at all")
+            expect("not gzip", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "invalid")
+            write_titles_file(td, extra={"format": "something-else"})
+            expect("wrong format", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "invalid")
+            write_titles_file(td, extra={"generatedAt": ""})
+            expect("no timestamp", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "invalid")
+            write_titles_file(td, age_days=-5)
+            expect("future timestamp", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "invalid")
+            write_titles_file(td, movie=[], series=[])
+            expect("empty", sync_meta.try_titles_file(d, "premiumtv", now)[2] == "invalid")
+        expect("reasons logged", "unbrauchbar" in buf.getvalue(), buf.getvalue())
+
+
+def test_titles_file_keeps_only_safe_fields():
+    with tempfile.TemporaryDirectory() as td:
+        path = write_titles_file(td, movie=[{
+            "id": "77", "name": "Film", "year": "2001", "tmdb": "abc", "cat": "3",
+            "stream_url": "http://host/movie/u/p/77.mkv", "password": "x", "direct_source": "http://y",
+        }], series=[{"id": "", "name": "ohne id"}, {"id": "5", "name": ""}, "kaputt"])
+        lists, info = sync_meta.load_titles_file(path, datetime.now(timezone.utc))
+        expect("one movie", len(lists["movie"]) == 1, lists)
+        expect("invalid series dropped", lists["series"] == [], lists)
+        item = lists["movie"][0]
+        expect("only safe keys", set(item) == {"stream_id", "name", "year", "category_id"}, item)
+        expect("non-numeric tmdb dropped", "tmdb_id" not in item, item)
+        expect("counts", info["movies"] == 1 and info["series"] == 0, info)
+
+
 def main():
     srv = mock_server.start(0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -478,6 +659,14 @@ def main():
         lambda: test_checkpoint_survives_hard_kill(base),
         lambda: test_prune_titles_gone_from_both_providers(base),
         lambda: test_list_fetch_logs_status_size_time(base),
+        test_titles_age_limit_env,
+        test_titles_file_rejects_bad_input,
+        test_titles_file_keeps_only_safe_fields,
+        lambda: test_fresh_titles_file_skips_ptv_server(base),
+        lambda: test_titles_file_without_ptv_secrets(base),
+        lambda: test_titles_file_only_no_logins_at_all(base),
+        lambda: test_stale_titles_file_uses_live_server_when_reachable(base),
+        lambda: test_stale_titles_file_fallback_when_server_unreachable(base),
     ]
     names = [
         "test_xtream_base_normalizes_urls",
@@ -497,6 +686,14 @@ def main():
         "test_checkpoint_survives_hard_kill",
         "test_prune_titles_gone_from_both_providers",
         "test_list_fetch_logs_status_size_time",
+        "test_titles_age_limit_env",
+        "test_titles_file_rejects_bad_input",
+        "test_titles_file_keeps_only_safe_fields",
+        "test_fresh_titles_file_skips_ptv_server",
+        "test_titles_file_without_ptv_secrets",
+        "test_titles_file_only_no_logins_at_all",
+        "test_stale_titles_file_uses_live_server_when_reachable",
+        "test_stale_titles_file_fallback_when_server_unreachable",
     ]
     failed = 0
     try:
