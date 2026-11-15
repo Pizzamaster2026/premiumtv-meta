@@ -37,9 +37,18 @@ jobs:
           ONE_URL: ${{ secrets.ONE_URL }}
           ONE_USER: ${{ secrets.ONE_USER }}
           ONE_PASS: ${{ secrets.ONE_PASS }}
-          # Stop new TMDB lookups before the 120-minute job timeout so this
-          # step exits 0 and the commit step can save a partial cache.
+          # Cap for TMDB lookups. The script also shrinks this automatically
+          # to (120 min job limit minus time already spent on list fetches
+          # minus a write/commit margin), so a slow PremiumTV list cannot
+          # push the job past the timeout.
           SYNC_TIME_BUDGET_MIN: "100"
+          SYNC_JOB_TIMEOUT_MIN: "120"
+          SYNC_JOB_MARGIN_MIN: "12"
+          # Large list endpoints (especially PremiumTV) may need several
+          # minutes. Override per provider with SYNC_LIST_TIMEOUT_PREMIUMTV_SEC
+          # / SYNC_LIST_RETRIES_PREMIUMTV if needed.
+          SYNC_LIST_TIMEOUT_SEC: "300"
+          SYNC_LIST_RETRIES: "2"
         run: python3 scripts/sync_meta.py --data-dir data
 
       # always(): also run after a timeout/cancel, so a mid-run checkpoint
