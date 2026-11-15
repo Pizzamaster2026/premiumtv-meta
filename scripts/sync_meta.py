@@ -13,6 +13,13 @@ PremiumTV Manager app uploads a reduced title list (no credentials, no stream
 URLs) to data/titles_<provider>.json.gz. A fresh file (<= SYNC_TITLES_MAX_AGE_DAYS,
 default 7) is used instead of the live list fetch for that provider. A stale
 file is only used when the live fetch fails or no login is configured.
+
+Sport schedule (optional, scripts/sport.py): with the One login set, one
+xmltv.php request (EPG only, no streams) builds data/sport.json for the
+player's "Sport live" row – next SYNC_SPORT_DAYS days (default 3), strict
+title-based classifier, bounded by SYNC_SPORT_BUDGET_SEC (default 300) and
+SYNC_SPORT_MAX_MB. Any failure only logs and keeps the old file; the TMDB
+sync continues. SYNC_SPORT=0 switches the step off.
 """
 from __future__ import annotations
 
@@ -28,6 +35,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sport  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
@@ -985,6 +995,24 @@ def missing_secrets_message(data_dir: Optional[Path] = None) -> Optional[str]:
     return None
 
 
+def sport_step(data_dir: Path, configured: list[dict]) -> str:
+    """Optional data/sport.json from the One provider's XMLTV. Never raises, never fails the sync."""
+    try:
+        if os.environ.get("SYNC_SPORT", "1").strip().lower() in ("0", "false", "no", "off"):
+            log("Sportplan: abgeschaltet (SYNC_SPORT=0).")
+            return "skipped"
+        pid = os.environ.get("SYNC_SPORT_PROVIDER", "one").strip().lower() or "one"
+        prov = next((p for p in configured if p["id"] == pid and p.get("url") and p.get("user") and p.get("pass")), None)
+        budget = max(10.0, env_number("SYNC_SPORT_BUDGET_SEC", sport.DEFAULT_BUDGET_SEC, float))
+        days = min(7.0, max(0.5, env_number("SYNC_SPORT_DAYS", sport.DEFAULT_DAYS, float)))
+        max_mb = max(1.0, env_number("SYNC_SPORT_MAX_MB", sport.DEFAULT_MAX_MB, float))
+        return sport.run_step(data_dir, prov, xtream_base, log, mask_url, USER_AGENT,
+                              budget_sec=budget, days=days, max_mb=max_mb)
+    except Exception as e:  # noqa: BLE001
+        log(f"Sportplan: übersprungen ({type(e).__name__}).")
+        return "failed"
+
+
 def sync(data_dir: Path) -> int:
     msg = missing_secrets_message(data_dir)
     if msg:
@@ -1060,6 +1088,8 @@ def sync(data_dir: Path) -> int:
             sources[p["id"]] = {"source": "server"}
         errors.extend(live_errors)
         catalogues[p["id"]] = lists
+
+    sport_step(data_dir, configured)
 
     total_lists = sum(len(v) for lists in catalogues.values() for v in lists.values())
     if total_lists == 0:
@@ -1312,12 +1342,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help=f"Write meta/index every N new entries (default: env SYNC_CHECKPOINT_EVERY or {DEFAULT_CHECKPOINT_EVERY})",
     )
+    p.add_argument(
+        "--sport-only",
+        action="store_true",
+        help="Only rebuild data/sport.json from the One EPG (no list fetch, no TMDB). Never fails.",
+    )
     args = p.parse_args(argv)
     if args.time_budget_min is not None:
         os.environ["SYNC_TIME_BUDGET_MIN"] = str(args.time_budget_min)
     if args.checkpoint_every is not None:
         os.environ["SYNC_CHECKPOINT_EVERY"] = str(args.checkpoint_every)
     data_dir = Path(args.data_dir)
+    if args.sport_only:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        sport_step(data_dir, configured_providers())
+        return 0
     try:
         return sync(data_dir)
     except SystemExit:
