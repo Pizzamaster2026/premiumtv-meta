@@ -37,10 +37,13 @@ OVERVIEW_MAX = 2000
 SHARD_BYTES = 8 * 1024 * 1024
 RATE_MAX = 40
 RATE_WINDOW_S = 10.0
-HTTP_TIMEOUT_LIST = 120
+# Long read timeout for the large Xtream list endpoints; TMDB stays short.
+# Overridable via SYNC_LIST_TIMEOUT_SEC / SYNC_LIST_TIMEOUT_<PROVIDER>_SEC.
+HTTP_TIMEOUT_LIST = 300
 HTTP_TIMEOUT_TMDB = 25
 HTTP_RETRIES = 4
-# Some Xtream panels ignore or stall on unknown clients; use a browser-like UA.
+DEFAULT_LIST_RETRIES = 2
+# Some Xtream panels ignore or stall on Python's default urllib UA.
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -49,6 +52,8 @@ USER_AGENT = (
 # Leave headroom under the workflow's timeout-minutes: 120 so a partial
 # result can be written and committed before the job is killed.
 DEFAULT_TIME_BUDGET_MIN = 100
+DEFAULT_JOB_TIMEOUT_MIN = 120
+DEFAULT_JOB_MARGIN_MIN = 12
 DEFAULT_CHECKPOINT_EVERY = 500
 
 PROVIDERS = (
@@ -129,9 +134,19 @@ def describe_http_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def http_get_json(url: str, timeout: int, retries: int = HTTP_RETRIES) -> Any:
+def format_bytes(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n} Bytes ({n / (1024 * 1024):.1f} MiB)"
+    if n >= 1024:
+        return f"{n} Bytes ({n / 1024:.1f} KiB)"
+    return f"{n} Bytes"
+
+
+def http_get_json(url: str, timeout: int, retries: int = HTTP_RETRIES, log_timing: bool = False) -> Any:
     """GET JSON. The URL must already be safe to log only via mask_url()."""
     last_err: Optional[Exception] = None
+    if retries < 1:
+        retries = 1
     for attempt in range(retries):
         req = urllib.request.Request(
             url,
@@ -141,9 +156,14 @@ def http_get_json(url: str, timeout: int, retries: int = HTTP_RETRIES) -> Any:
                 "User-Agent": USER_AGENT,
             },
         )
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
                 raw = resp.read()
+            elapsed = time.monotonic() - started
+            if log_timing:
+                log(f"    Antwort HTTP {status}, {format_bytes(len(raw) if raw else 0)} in {elapsed:.1f}s")
             if not raw:
                 return None
             return json.loads(raw.decode("utf-8"))
@@ -217,13 +237,22 @@ def xtream_list_url(base: str, user: str, password: str, action: str) -> str:
 ALLOWED_XTREAM_ACTIONS = frozenset({"get_vod_streams", "get_series"})
 
 
-def fetch_xtream_list(base: str, user: str, password: str, action: str) -> list:
+def fetch_xtream_list(
+    base: str,
+    user: str,
+    password: str,
+    action: str,
+    timeout: Optional[int] = None,
+    retries: Optional[int] = None,
+) -> list:
     if action not in ALLOWED_XTREAM_ACTIONS:
         raise ValueError(f"refusing Xtream action {action!r} (only list endpoints are allowed)")
     url = xtream_list_url(base, user, password, action)
-    log(f"  Liste {action} von {mask_url(url)} …")
+    timeout = HTTP_TIMEOUT_LIST if timeout is None else int(timeout)
+    retries = DEFAULT_LIST_RETRIES if retries is None else int(retries)
+    log(f"  Liste {action} von {mask_url(url)} (Timeout {timeout}s, {retries} Versuche) …")
     try:
-        data = http_get_json(url, timeout=HTTP_TIMEOUT_LIST)
+        data = http_get_json(url, timeout=timeout, retries=retries, log_timing=True)
     except Exception as e:
         raise RuntimeError(
             f"Liste {action} von {mask_url(url)} fehlgeschlagen: {describe_http_error(e)}"
@@ -259,23 +288,49 @@ def item_year(item: dict, kind: str) -> str:
 
 
 def item_id(item: dict, kind: str) -> str:
-    key = "series_id" if kind == "series" else "stream_id"
-    return str(item.get(key) or "").strip()
+    """Provider stream/series id.
+
+    Official Xtream lists use series_id / stream_id, but some panels only send
+    `id` (the player already copies id → series_id/stream_id). Accept those
+    fallbacks so a whole series list is not silently dropped.
+    """
+    keys = ("series_id", "id", "stream_id") if kind == "series" else ("stream_id", "vod_id", "id")
+    for key in keys:
+        raw = item.get(key)
+        if raw is None or raw == "":
+            continue
+        s = str(raw).strip()
+        if s:
+            return s
+    return ""
 
 
 def collect_titles(catalogues: dict[str, dict[str, list]]) -> list[dict]:
     """Deduplicate titles across providers. Each group maps many stream ids to one TMDB lookup."""
     groups: dict[str, dict] = {}
     order: list[str] = []
+    skipped_no_id = skipped_no_name = skipped_short = skipped_not_dict = 0
     for provider, lists in catalogues.items():
         for kind, items in lists.items():
             typ = "series" if kind == "series" else "movie"
+            raw_n = len(items) if isinstance(items, list) else 0
+            first = next((x for x in items if isinstance(x, dict)), None) if isinstance(items, list) else None
+            if first is not None:
+                fields = ", ".join(sorted(str(k) for k in first.keys()))
+                log(f"  {provider}/{typ}: {raw_n} Roh-Einträge, Felder: {fields}")
+            elif raw_n:
+                log(f"  {provider}/{typ}: {raw_n} Roh-Einträge, erster Typ: {type(items[0]).__name__}")
             for item in items:
                 if not isinstance(item, dict):
+                    skipped_not_dict += 1
                     continue
                 sid = item_id(item, kind)
                 name = item_name(item)
-                if not sid or not name:
+                if not sid:
+                    skipped_no_id += 1
+                    continue
+                if not name:
+                    skipped_no_name += 1
                     continue
                 year = item_year(item, typ)
                 tmdb_id = extract_tmdb_id(item)
@@ -285,6 +340,7 @@ def collect_titles(catalogues: dict[str, dict[str, list]]) -> list[dict]:
                 elif c["q"] and len(c["q"]) >= 2:
                     gid = f"{typ}:title:{title_key(typ, name, year)}"
                 else:
+                    skipped_short += 1
                     continue
                 if gid not in groups:
                     groups[gid] = {
@@ -305,7 +361,37 @@ def collect_titles(catalogues: dict[str, dict[str, list]]) -> list[dict]:
                 g["refs"].append({"provider": provider, "type": typ, "id": sid, "name": name, "year": year})
                 if len(g["samples"]) < 3:
                     g["samples"].append(name)
-    return [groups[k] for k in order]
+    out = [groups[k] for k in order]
+    n_movie = sum(1 for g in out if g["type"] == "movie")
+    n_series = sum(1 for g in out if g["type"] == "series")
+    log(f"{len(out)} eindeutige Titel ({n_movie} Filme, {n_series} Serien) über alle Anbieter.")
+    skipped = skipped_no_id + skipped_no_name + skipped_short + skipped_not_dict
+    if skipped:
+        log(
+            f"  Übersprungen: {skipped_no_id} ohne ID, {skipped_no_name} ohne Namen, "
+            f"{skipped_short} ohne brauchbaren Titel, {skipped_not_dict} kein Objekt."
+        )
+    return interleave_by_type(out)
+
+
+def interleave_by_type(groups: list[dict]) -> list[dict]:
+    """Round-robin movies and series so a TMDB time budget cannot starve one type."""
+    buckets: dict[str, list[dict]] = {"movie": [], "series": []}
+    other: list[dict] = []
+    for g in groups:
+        typ = g.get("type")
+        if typ in buckets:
+            buckets[typ].append(g)
+        else:
+            other.append(g)
+    out: list[dict] = []
+    n = max((len(v) for v in buckets.values()), default=0)
+    for i in range(n):
+        for typ in ("movie", "series"):
+            if i < len(buckets[typ]):
+                out.append(buckets[typ][i])
+    out.extend(other)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +584,55 @@ def env_number(name: str, default: float, kind=float):
         return kind(raw)
     except (TypeError, ValueError):
         return default
+
+
+def env_for_provider(provider_id: str, base: str, default, kind=float):
+    """Prefer a per-provider override, then the shared env var, then default.
+
+    Example: base SYNC_LIST_TIMEOUT_SEC + provider premiumtv
+    reads SYNC_LIST_TIMEOUT_PREMIUMTV_SEC, then SYNC_LIST_TIMEOUT_SEC.
+    """
+    pid = re.sub(r"[^A-Z0-9]+", "_", (provider_id or "").strip().upper()).strip("_")
+    if pid:
+        if base.endswith("_SEC"):
+            specific = f"{base[:-4]}_{pid}_SEC"
+        elif base.endswith("_MIN"):
+            specific = f"{base[:-4]}_{pid}_MIN"
+        else:
+            specific = f"{base}_{pid}"
+        raw = os.environ.get(specific, "").strip()
+        if raw:
+            try:
+                return kind(raw)
+            except (TypeError, ValueError):
+                pass
+    return env_number(base, default, kind)
+
+
+def list_timeout_sec(provider_id: str) -> int:
+    n = int(env_for_provider(provider_id, "SYNC_LIST_TIMEOUT_SEC", HTTP_TIMEOUT_LIST, float))
+    return n if n >= 1 else 1
+
+
+def list_retries(provider_id: str) -> int:
+    n = int(env_for_provider(provider_id, "SYNC_LIST_RETRIES", DEFAULT_LIST_RETRIES, float))
+    return n if n >= 1 else 1
+
+
+def tmdb_budget_after(elapsed_sec: float) -> tuple[float, float]:
+    """TMDB lookup budget: leftover job time minus a write/commit margin, capped by SYNC_TIME_BUDGET_MIN."""
+    job_min = env_number("SYNC_JOB_TIMEOUT_MIN", DEFAULT_JOB_TIMEOUT_MIN, float)
+    margin_min = env_number("SYNC_JOB_MARGIN_MIN", DEFAULT_JOB_MARGIN_MIN, float)
+    cap_min = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
+    if job_min < 0:
+        job_min = 0.0
+    if margin_min < 0:
+        margin_min = 0.0
+    if cap_min < 0:
+        cap_min = 0.0
+    remaining_min = max(0.0, job_min - max(0.0, elapsed_sec) / 60.0 - margin_min)
+    minutes = min(remaining_min, cap_min)
+    return minutes, minutes * 60.0
 
 
 def time_budget_seconds() -> tuple[float, float]:
@@ -727,15 +862,23 @@ def sync(data_dir: Path) -> int:
     now = datetime.now(timezone.utc)
     generated_at = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     tmdb = TmdbClient(os.environ["TMDB_API_KEY"].strip(), os.environ.get("TMDB_API_BASE", TMDB_DEFAULT_BASE).strip() or TMDB_DEFAULT_BASE)
+    job_started = time.monotonic()
 
     catalogues: dict[str, dict[str, list]] = {}
     errors = []
     for p in configured_providers():
-        log(f"Anbieter {p['id']}: {mask_url(p['url'])} (Benutzer {mask_secret(p['user'])})")
+        timeout = list_timeout_sec(p["id"])
+        retries = list_retries(p["id"])
+        log(
+            f"Anbieter {p['id']}: {mask_url(p['url'])} (Benutzer {mask_secret(p['user'])}, "
+            f"Listen-Timeout {timeout}s, {retries} Versuche)"
+        )
         lists: dict[str, list] = {}
         for kind, action in (("movie", "get_vod_streams"), ("series", "get_series")):
             try:
-                items = fetch_xtream_list(p["url"], p["user"], p["pass"], action)
+                items = fetch_xtream_list(
+                    p["url"], p["user"], p["pass"], action, timeout=timeout, retries=retries
+                )
                 lists[kind] = items
                 log(f"    {len(items)} Einträge")
             except Exception as e:
@@ -749,16 +892,22 @@ def sync(data_dir: Path) -> int:
         die("Keine Listen empfangen. Abbruch, vorhandene Cache-Dateien bleiben unverändert.", 1)
 
     groups = collect_titles(catalogues)
-    log(f"{len(groups)} eindeutige Titel über alle Anbieter.")
 
     entries, misses, prev_by_title = load_existing(data_dir)
     fetched = skipped = refreshed = new_hits = new_misses = 0
-    budget_min, budget_sec = time_budget_seconds()
+    elapsed_lists = time.monotonic() - job_started
+    budget_min, budget_sec = tmdb_budget_after(elapsed_lists)
     ckpt_every = checkpoint_every()
     started = time.monotonic()
     progress_since_ckpt = 0
     budget_stopped = False
-    log(f"Zeitbudget: {budget_min:g} Min. (Zwischenstand alle {ckpt_every} neuen Einträge).")
+    cap_min = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
+    log(
+        f"Zeitbudget: {budget_min:g} Min. für TMDB "
+        f"(Listen dauerten {elapsed_lists / 60.0:.1f} Min., "
+        f"Rest bis Job-Limit minus Reserve, höchstens {cap_min:g} Min.; "
+        f"Zwischenstand alle {ckpt_every} neuen Einträge)."
+    )
 
     def budget_hit() -> bool:
         nonlocal budget_stopped
