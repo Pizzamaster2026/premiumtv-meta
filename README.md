@@ -53,7 +53,7 @@ Wenn du vorerst nur einen Anbieter nutzt, reicht der jeweilige Block (`PTV_*` **
 
 Beim ersten Mal kann der Lauf länger dauern (viele neue Titel). Danach bleiben bekannte Einträge liegen, und es werden nur noch neue oder veraltete Titel bei TMDB abgefragt.
 
-Der Job hat bei GitHub ein Zeitlimit von 120 Minuten. Das Skript beendet neue TMDB-Abfragen nach 100 Minuten, schreibt den Zwischenstand und endet ohne Fehler, damit der Cache gespeichert wird. Zusätzlich wird alle 500 neuen Einträge zwischengespeichert. Der nächste Lauf macht bei den restlichen Titeln weiter.
+Der Job hat bei GitHub ein Zeitlimit von 120 Minuten. Das Skript holt die großen Listen mit bis zu 300 Sekunden Wartezeit und nur zwei Versuchen (pro Anbieter über `SYNC_LIST_TIMEOUT_PREMIUMTV_SEC` / `SYNC_LIST_TIMEOUT_ONE_SEC` änderbar). Anschließend bleiben für neue TMDB-Abfragen höchstens 100 Minuten, abzüglich der bereits verbrauchten Listenzeit und einer Reserve zum Speichern. Der Zwischenstand wird geschrieben, der Job endet ohne Fehler, und alle 500 neuen Einträge wird zusätzlich gespeichert. Der nächste Lauf macht bei den restlichen Titeln weiter. Filme und Serien werden dabei abwechselnd abgeglichen, damit ein Zeitlimit nicht nur eine Sorte übrig lässt.
 
 Titel, die bei keinem der Anbieter mehr in den Listen stehen, werden aus dem Cache entfernt.
 
