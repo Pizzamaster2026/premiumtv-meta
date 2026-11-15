@@ -7,9 +7,16 @@ get_vod_info / get_series_info. Incremental: keeps existing entries and only
 contacts TMDB for missing titles or entries older than REFRESH_DAYS.
 
 Credentials come from environment / GitHub Actions secrets and are never logged.
+
+Titles files: if a provider blocks GitHub's IP ranges (PremiumTV does), the
+PremiumTV Manager app uploads a reduced title list (no credentials, no stream
+URLs) to data/titles_<provider>.json.gz. A fresh file (<= SYNC_TITLES_MAX_AGE_DAYS,
+default 7) is used instead of the live list fetch for that provider. A stale
+file is only used when the live fetch fails or no login is configured.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -55,6 +62,10 @@ DEFAULT_TIME_BUDGET_MIN = 100
 DEFAULT_JOB_TIMEOUT_MIN = 120
 DEFAULT_JOB_MARGIN_MIN = 12
 DEFAULT_CHECKPOINT_EVERY = 500
+
+DEFAULT_TITLES_MAX_AGE_DAYS = 7.0
+TITLES_FORMAT = "premiumtv-titles"
+TITLES_MAX_BYTES = 256 * 1024 * 1024  # decompressed safety cap
 
 PROVIDERS = (
     {"id": "premiumtv", "url": "PTV_URL", "user": "PTV_USER", "pass": "PTV_PASS"},
@@ -269,6 +280,121 @@ def fetch_xtream_list(
     if not isinstance(data, list):
         raise RuntimeError(f"Unerwartete Antwort von {mask_url(url)}.")
     return data
+
+
+# ---------------------------------------------------------------------------
+# Titles file uploaded by the PremiumTV Manager app
+# ---------------------------------------------------------------------------
+
+def titles_file_path(data_dir: Path, provider_id: str) -> Path:
+    pid = re.sub(r"[^a-z0-9]+", "", (provider_id or "").lower())
+    return Path(data_dir) / f"titles_{pid}.json.gz"
+
+
+def titles_max_age_days(provider_id: str) -> float:
+    n = float(env_for_provider(provider_id, "SYNC_TITLES_MAX_AGE_DAYS", DEFAULT_TITLES_MAX_AGE_DAYS, float))
+    return n if n >= 0 else 0.0
+
+
+def _titles_rows(rows: Any, kind: str) -> list[dict]:
+    """Convert titles-file rows to Xtream-like list items (only safe fields)."""
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out
+    id_key = "series_id" if kind == "series" else "stream_id"
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get("id") if r.get("id") is not None else "").strip()
+        name = str(r.get("name") or "").strip()
+        if not sid or not name:
+            continue
+        item: dict = {id_key: sid, "name": name[:300]}
+        year = extract_year(str(r.get("year") or ""))
+        if year:
+            item["year"] = year
+        tmdb = r.get("tmdb")
+        if tmdb not in (None, "", 0, "0"):
+            s = str(tmdb).strip()
+            if re.fullmatch(r"\d{1,9}", s):
+                item["tmdb_id"] = s
+        cat = r.get("cat")
+        if cat not in (None, ""):
+            item["category_id"] = str(cat)[:40]
+        out.append(item)
+    return out
+
+
+def load_titles_file(path: Path, now: datetime) -> tuple[dict[str, list], dict]:
+    """Read data/titles_<provider>.json.gz.
+
+    Returns ({"movie": [...], "series": [...]}, info) where info has
+    generatedAt, age_days, movies, series. Raises ValueError when the file is
+    unreadable, has the wrong format, has no timestamp or no titles.
+    """
+    try:
+        with gzip.open(path, "rb") as fh:
+            raw = fh.read(TITLES_MAX_BYTES + 1)
+    except (OSError, EOFError) as e:
+        raise ValueError(f"nicht lesbar ({type(e).__name__})") from e
+    if len(raw) > TITLES_MAX_BYTES:
+        raise ValueError("zu groß")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError("kein gültiges JSON") from e
+    if not isinstance(doc, dict) or doc.get("format") != TITLES_FORMAT:
+        raise ValueError("falsches Format")
+    try:
+        version = int(doc.get("version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version != 1:
+        raise ValueError(f"unbekannte Version {doc.get('version')!r}")
+    ts = parse_iso(str(doc.get("generatedAt") or ""))
+    if not ts:
+        raise ValueError("generatedAt fehlt")
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_days = (now - ts).total_seconds() / 86400.0
+    if age_days < -1.0:
+        raise ValueError("generatedAt liegt in der Zukunft")
+    age_days = max(0.0, age_days)
+    lists = {"movie": _titles_rows(doc.get("movie"), "movie"), "series": _titles_rows(doc.get("series"), "series")}
+    if not lists["movie"] and not lists["series"]:
+        raise ValueError("enthält keine Titel")
+    info = {
+        "generatedAt": ts.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "age_days": age_days,
+        "movies": len(lists["movie"]),
+        "series": len(lists["series"]),
+    }
+    return lists, info
+
+
+def try_titles_file(data_dir: Path, provider_id: str, now: datetime) -> tuple[Optional[dict], Optional[dict], str]:
+    """Return (lists, info, status) with status 'missing', 'invalid', 'fresh' or 'stale'."""
+    path = titles_file_path(data_dir, provider_id)
+    if not path.is_file():
+        return None, None, "missing"
+    try:
+        lists, info = load_titles_file(path, now)
+    except ValueError as e:
+        log(f"  Titeldatei {path.name} unbrauchbar: {e} – wird ignoriert.")
+        return None, None, "invalid"
+    max_age = titles_max_age_days(provider_id)
+    status = "fresh" if info["age_days"] <= max_age else "stale"
+    info["max_age_days"] = max_age
+    info["file"] = path.name
+    return lists, info, status
+
+
+def describe_titles_info(info: dict) -> str:
+    return (
+        f"{info['file']} vom {info['generatedAt']} "
+        f"(Alter {info['age_days']:.1f} Tage, Grenze {info['max_age_days']:g} Tage; "
+        f"{info['movies']} Filme, {info['series']} Serien)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -820,9 +946,22 @@ def configured_providers() -> list[dict]:
     return out
 
 
-def missing_secrets_message() -> Optional[str]:
+def titles_only_providers(data_dir: Optional[Path], configured: list[dict]) -> list[dict]:
+    """Providers without a complete login that still have a titles file."""
+    if data_dir is None:
+        return []
+    have = {p["id"] for p in configured}
+    out = []
+    for p in PROVIDERS:
+        if p["id"] not in have and titles_file_path(data_dir, p["id"]).is_file():
+            out.append({"id": p["id"], "url": "", "user": "", "pass": "", "env": p, "titles_only": True})
+    return out
+
+
+def missing_secrets_message(data_dir: Optional[Path] = None) -> Optional[str]:
     key = os.environ.get("TMDB_API_KEY", "").strip()
     provs = configured_providers()
+    provs = provs + titles_only_providers(data_dir, provs)
     if not key and not provs:
         return (
             "Es fehlen die GitHub-Secrets. Bitte unter "
@@ -847,7 +986,7 @@ def missing_secrets_message() -> Optional[str]:
 
 
 def sync(data_dir: Path) -> int:
-    msg = missing_secrets_message()
+    msg = missing_secrets_message(data_dir)
     if msg:
         log(msg)
         return 0
@@ -866,14 +1005,38 @@ def sync(data_dir: Path) -> int:
 
     catalogues: dict[str, dict[str, list]] = {}
     errors = []
-    for p in configured_providers():
+    sources: dict[str, dict] = {}
+    configured = configured_providers()
+    for p in configured + titles_only_providers(data_dir, configured):
+        file_lists, file_info, file_status = try_titles_file(data_dir, p["id"], now)
+        if file_status == "fresh":
+            log(f"Anbieter {p['id']}: Quelle Titeldatei {describe_titles_info(file_info)} – Server wird nicht abgefragt.")
+            catalogues[p["id"]] = file_lists
+            sources[p["id"]] = {"source": "titles-file", "generatedAt": file_info["generatedAt"],
+                                "ageDays": round(file_info["age_days"], 2)}
+            continue
+        if file_status == "stale":
+            log(f"Anbieter {p['id']}: Titeldatei ist zu alt: {describe_titles_info(file_info)}.")
+        if p.get("titles_only"):
+            if file_lists is not None:
+                log(f"Anbieter {p['id']}: kein Zugang hinterlegt – nutze die alte Titeldatei, "
+                    "es wird nichts aus dem Cache entfernt.")
+                catalogues[p["id"]] = file_lists
+                errors.append(f"{p['id']}: nur veraltete Titeldatei")
+                sources[p["id"]] = {"source": "titles-file-stale", "generatedAt": file_info["generatedAt"],
+                                    "ageDays": round(file_info["age_days"], 2)}
+            else:
+                log(f"Anbieter {p['id']}: kein Zugang und keine brauchbare Titeldatei – übersprungen.")
+            continue
+
         timeout = list_timeout_sec(p["id"])
         retries = list_retries(p["id"])
         log(
-            f"Anbieter {p['id']}: {mask_url(p['url'])} (Benutzer {mask_secret(p['user'])}, "
+            f"Anbieter {p['id']}: Quelle Server {mask_url(p['url'])} (Benutzer {mask_secret(p['user'])}, "
             f"Listen-Timeout {timeout}s, {retries} Versuche)"
         )
         lists: dict[str, list] = {}
+        live_errors: list[str] = []
         for kind, action in (("movie", "get_vod_streams"), ("series", "get_series")):
             try:
                 items = fetch_xtream_list(
@@ -882,9 +1045,20 @@ def sync(data_dir: Path) -> int:
                 lists[kind] = items
                 log(f"    {len(items)} Einträge")
             except Exception as e:
-                errors.append(str(e))
+                live_errors.append(str(e))
                 log(f"    Fehler: {e}")
                 lists[kind] = []
+        if live_errors and file_lists is not None:
+            log(f"Anbieter {p['id']}: Server-Abruf fehlgeschlagen – nutze stattdessen die alte Titeldatei "
+                f"({file_info['generatedAt']}); es wird nichts aus dem Cache entfernt.")
+            for kind in ("movie", "series"):
+                if not lists.get(kind):
+                    lists[kind] = file_lists.get(kind, [])
+            sources[p["id"]] = {"source": "titles-file-stale", "generatedAt": file_info["generatedAt"],
+                                "ageDays": round(file_info["age_days"], 2)}
+        else:
+            sources[p["id"]] = {"source": "server"}
+        errors.extend(live_errors)
         catalogues[p["id"]] = lists
 
     total_lists = sum(len(v) for lists in catalogues.values() for v in lists.values())
@@ -954,6 +1128,7 @@ def sync(data_dir: Path) -> int:
             "tmdbCalls": tmdb.calls,
             "partial": partial,
             "budgetStopped": budget_stopped,
+            "sources": sources,
         }
         write_outputs(data_dir, entries, by_id, by_title, misses, generated_at, stats_partial)
         (data_dir / ".changed").write_text("1\n", encoding="utf-8")
@@ -1092,6 +1267,7 @@ def sync(data_dir: Path) -> int:
         "tmdbCalls": tmdb.calls,
         "partial": False,
         "budgetStopped": budget_stopped,
+        "sources": sources,
     }
     log(
         f"Fertig: {stats['movies']} Filme, {stats['series']} Serien, "
