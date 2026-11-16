@@ -65,7 +65,7 @@ jobs:
         if: always()
         run: |
           rm -f data/.changed
-          git add data/index.json data/meta.json data/meta-*.json 2>/dev/null || true
+          git add data/index.json data/meta.json data/meta-*.json data/status.json 2>/dev/null || true
           git add -u data/
           if git diff --cached --quiet; then
             echo "Keine Änderungen am Cache."
