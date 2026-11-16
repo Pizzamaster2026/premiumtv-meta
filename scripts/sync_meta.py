@@ -1116,6 +1116,24 @@ def existing_entry_key(g: dict, entries: dict, prev_by_title: dict) -> Optional[
     return None
 
 
+def apply_existing_to_groups(groups: list[dict], entries: dict, prev_by_title: dict) -> int:
+    """Set group['resolved'] from the on-disk cache so mid-run coverage counts
+    already-known TMDB matches. Does not mark misses; coverage_from_groups
+    treats those via the misses dict. Pending is then only titles with no
+    answer yet (no cache hit and no miss).
+    """
+    n = 0
+    for g in groups:
+        if g.get("resolved"):
+            n += 1
+            continue
+        key = existing_entry_key(g, entries, prev_by_title)
+        if key:
+            g["resolved"] = key
+            n += 1
+    return n
+
+
 def needs_tmdb_lookup(g: dict, entries: dict, misses: dict, prev_by_title: dict, now: datetime) -> bool:
     """True if this run still needs a TMDB search or details call for the title."""
     typ, query, year = g["type"], g["query"], g["year"]
@@ -1368,7 +1386,8 @@ def sync(data_dir: Path) -> int:
     progress_since_ckpt = 0
     budget_stopped = False
     open_total = sum(1 for g in groups if needs_tmdb_lookup(g, entries, misses, prev_by_title, now))
-    log(f"{open_total} Titel in diesem Lauf noch abzufragen.")
+    cached = apply_existing_to_groups(groups, entries, prev_by_title)
+    log(f"{open_total} Titel in diesem Lauf noch abzufragen, {cached} schon mit TMDB-Daten im Cache.")
     cap_min = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
     log(
         f"Zeitbudget: {budget_min:g} Min. für TMDB "
