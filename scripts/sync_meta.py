@@ -930,7 +930,24 @@ def build_status(
     with_tmdb = int(overall["withTmdb"])
     no_match = int(overall["noMatch"])
     pending = int(overall["pending"])
-    return {
+    queried = stats.get("queried")
+    open_total = stats.get("openTotal")
+    prog_processed = int(queried) if queried is not None else with_tmdb + no_match
+    prog_total = int(open_total) if open_total is not None else titles
+    progress = {
+        "processed": prog_processed,
+        "total": prog_total,
+        "remaining": pending if open_total is None else max(0, prog_total - prog_processed),
+        "new": int(stats.get("new") or 0),
+        "refreshed": int(stats.get("refreshed") or 0),
+        "tmdbCalls": int(stats.get("tmdbCalls") or 0),
+    }
+    if stats.get("elapsedSec") is not None:
+        try:
+            progress["elapsedSec"] = int(stats["elapsedSec"])
+        except (TypeError, ValueError):
+            pass
+    doc = {
         "version": 1,
         "updatedAt": updated_at,
         "phase": phase,
@@ -943,23 +960,128 @@ def build_status(
         "pending": pending,
         "coveragePct": overall.get("pct") or 0.0,
         "providers": cov["providers"],
-        "progress": {
-            "processed": with_tmdb + no_match,
-            "total": titles,
-            "new": int(stats.get("new") or 0),
-            "refreshed": int(stats.get("refreshed") or 0),
-            "tmdbCalls": int(stats.get("tmdbCalls") or 0),
-        },
+        "progress": progress,
     }
+    if open_total is not None:
+        doc["openTotal"] = int(open_total)
+        doc["queried"] = int(queried or 0)
+    return doc
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, partial: bool) -> Path:
-    """Small public data/status.json for the Manager dashboard. Never contains secrets."""
+# Test hook: callable(doc) -> bool. When set, publish_live_status uses it instead of GitHub.
+live_publisher = None
+_last_live_push = 0.0
+DEFAULT_STATUS_PUSH_SEC = 240
+
+
+def live_push_enabled() -> bool:
+    return os.environ.get("SYNC_STATUS_BRANCH_PUSH", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def github_api(method: str, path: str, token: str, body: Optional[dict] = None) -> tuple[int, Any]:
+    """GitHub REST call. Token only in the Authorization header, never logged."""
+    base = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+    url = base + path
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    req.add_header("User-Agent", "premiumtv-meta-sync")
+    if data is not None:
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8") if e.fp else ""
+        try:
+            parsed: Any = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        return e.code, parsed
+
+
+def publish_live_status(doc: dict) -> bool:
+    """Force-update branch 'status' so it contains only data/status.json. Never logs tokens."""
+    if live_publisher is not None:
+        return bool(live_publisher(doc))
+    if not live_push_enabled():
+        return False
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not token or not repo:
+        return False
+    branch = (os.environ.get("SYNC_STATUS_BRANCH") or "status").strip() or "status"
+    try:
+        text = json.dumps(doc, ensure_ascii=False, separators=(",", ":")) + "\n"
+        code, blob = github_api("POST", f"/repos/{repo}/git/blobs", token, {"content": text, "encoding": "utf-8"})
+        if code >= 300 or not isinstance(blob, dict) or not blob.get("sha"):
+            log("Live-Status: Blob konnte nicht angelegt werden.")
+            return False
+        code, tree = github_api(
+            "POST",
+            f"/repos/{repo}/git/trees",
+            token,
+            {"tree": [{"path": "data/status.json", "mode": "100644", "type": "blob", "sha": blob["sha"]}]},
+        )
+        if code >= 300 or not isinstance(tree, dict) or not tree.get("sha"):
+            log("Live-Status: Tree konnte nicht angelegt werden.")
+            return False
+        code, commit = github_api(
+            "POST",
+            f"/repos/{repo}/git/commits",
+            token,
+            {"message": "chore: Sync-Fortschritt", "tree": tree["sha"], "parents": []},
+        )
+        if code >= 300 or not isinstance(commit, dict) or not commit.get("sha"):
+            log("Live-Status: Commit konnte nicht angelegt werden.")
+            return False
+        sha = commit["sha"]
+        code, _ref = github_api("GET", f"/repos/{repo}/git/ref/heads/{branch}", token)
+        if code == 404:
+            code, _ref = github_api("POST", f"/repos/{repo}/git/refs", token, {"ref": f"refs/heads/{branch}", "sha": sha})
+        else:
+            code, _ref = github_api(
+                "PATCH", f"/repos/{repo}/git/refs/heads/{branch}", token, {"sha": sha, "force": True}
+            )
+        if code >= 300:
+            log("Live-Status: Zweig konnte nicht aktualisiert werden.")
+            return False
+        log("Live-Status auf den Zweig status geschrieben.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"Live-Status: übersprungen ({type(e).__name__}).")
+        return False
+
+
+def maybe_publish_live(doc: dict, force: bool = False) -> bool:
+    """Publish to the status branch, at most every SYNC_STATUS_PUSH_SEC (default 4 Min.)."""
+    global _last_live_push
+    interval = max(30.0, float(env_number("SYNC_STATUS_PUSH_SEC", DEFAULT_STATUS_PUSH_SEC, float)))
+    now = time.monotonic()
+    if not force and _last_live_push and (now - _last_live_push) < interval:
+        return False
+    ok = publish_live_status(doc)
+    if ok:
+        _last_live_push = now
+    return ok
+
+
+def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, partial: bool, force_live: bool = False) -> Path:
+    """Small public data/status.json for the Manager dashboard. Never contains secrets.
+
+    Also publishes a snapshot to the 'status' branch (throttled), so the Manager
+    can show live progress without committing to main mid-run.
+    """
     phase = "tmdb" if partial else ("budget_stopped" if stats.get("budgetStopped") else "done")
+    if stats.get("phase"):
+        phase = str(stats["phase"])
     doc = build_status(
         groups=groups,
         misses=misses,
@@ -971,7 +1093,41 @@ def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, 
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "status.json"
     _atomic_write(path, doc)
+    maybe_publish_live(doc, force=force_live or not partial)
     return path
+
+
+def existing_entry_key(g: dict, entries: dict, prev_by_title: dict) -> Optional[str]:
+    typ, query, year = g["type"], g["query"], g["year"]
+    tid = g.get("tmdb_id")
+    if tid:
+        return entry_key(typ, tid)
+    miss_key = title_key(typ, query, year)
+    prev = prev_by_title.get(miss_key)
+    if not prev:
+        for ref in g.get("refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            prev = prev_by_title.get(title_key(ref.get("type") or typ, ref.get("name") or "", ref.get("year") or ""))
+            if prev:
+                break
+    if prev and prev in entries:
+        return prev
+    return None
+
+
+def needs_tmdb_lookup(g: dict, entries: dict, misses: dict, prev_by_title: dict, now: datetime) -> bool:
+    """True if this run still needs a TMDB search or details call for the title."""
+    typ, query, year = g["type"], g["query"], g["year"]
+    tid = g.get("tmdb_id")
+    existing_key = existing_entry_key(g, entries, prev_by_title)
+    entry = entries.get(existing_key) if existing_key else None
+    miss = misses.get(title_key(typ, query, year))
+    if entry and is_fresh(entry, now, REFRESH_DAYS):
+        return False
+    if not tid and miss and is_fresh(miss, now, MISS_DAYS):
+        return False
+    return True
 
 
 def write_outputs(data_dir: Path, entries: dict, by_id: dict, by_title: dict, misses: dict, generated_at: str, stats: dict) -> list[Path]:
@@ -1211,6 +1367,8 @@ def sync(data_dir: Path) -> int:
     started = time.monotonic()
     progress_since_ckpt = 0
     budget_stopped = False
+    open_total = sum(1 for g in groups if needs_tmdb_lookup(g, entries, misses, prev_by_title, now))
+    log(f"{open_total} Titel in diesem Lauf noch abzufragen.")
     cap_min = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
     log(
         f"Zeitbudget: {budget_min:g} Min. für TMDB "
@@ -1265,13 +1423,44 @@ def sync(data_dir: Path) -> int:
             "partial": partial,
             "budgetStopped": budget_stopped,
             "sources": sources,
+            "openTotal": open_total,
+            "queried": new_hits + new_misses + refreshed,
+            "elapsedSec": int(time.monotonic() - job_started),
+            "phase": "tmdb",
         }
         write_status(data_dir, groups, misses, stats_partial, partial=True)
         write_outputs(data_dir, entries, by_id, by_title, misses, generated_at, stats_partial)
         (data_dir / ".changed").write_text("1\n", encoding="utf-8")
         log(f"Zwischenstand geschrieben ({len(entries)} Einträge).")
 
+    def progress_stats(phase: str = "tmdb") -> dict:
+        return {
+            "providers": sorted(catalogues.keys()),
+            "titles": len(groups),
+            "movies": sum(1 for k in entries if k.startswith("movie:")),
+            "series": sum(1 for k in entries if k.startswith("tv:")),
+            "unmatched": sum(1 for g in groups if not g.get("resolved")),
+            "new": new_hits,
+            "refreshed": refreshed,
+            "misses": new_misses,
+            "skippedFresh": skipped,
+            "tmdbCalls": tmdb.calls,
+            "partial": True,
+            "budgetStopped": budget_stopped,
+            "sources": sources,
+            "openTotal": open_total,
+            "queried": new_hits + new_misses + refreshed,
+            "elapsedSec": int(time.monotonic() - job_started),
+            "phase": phase,
+        }
+
+    write_status(data_dir, groups, misses, progress_stats("tmdb"), partial=True, force_live=True)
+
     for g in groups:
+        # Time-based live snapshot (default every 4 min), independent of the 500-entry checkpoint.
+        interval = max(30.0, float(env_number("SYNC_STATUS_PUSH_SEC", DEFAULT_STATUS_PUSH_SEC, float)))
+        if _last_live_push and (time.monotonic() - _last_live_push) >= interval:
+            write_status(data_dir, groups, misses, progress_stats("tmdb"), partial=True)
         typ, query, year = g["type"], g["query"], g["year"]
         tid = g["tmdb_id"]
         miss_key = title_key(typ, query, year)
@@ -1405,6 +1594,10 @@ def sync(data_dir: Path) -> int:
         "partial": False,
         "budgetStopped": budget_stopped,
         "sources": sources,
+        "openTotal": open_total,
+        "queried": new_hits + new_misses + refreshed,
+        "elapsedSec": int(time.monotonic() - job_started),
+        "phase": "budget_stopped" if budget_stopped else "done",
     }
     log(
         f"Fertig: {stats['movies']} Filme, {stats['series']} Serien, "
