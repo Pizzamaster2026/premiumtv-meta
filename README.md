@@ -87,7 +87,7 @@ Die PTV-Secrets können bleiben; sie werden nur noch gebraucht, wenn die Datei f
 Der Workflow **„Sportplan aktualisieren“** (`.github/workflows/sync-sport.yml`) läuft alle 6 Stunden und baut `data/sport.json` aus dem EPG von **One** (eine Anfrage an `xmltv.php`, keine Streams, kein TMDB). Er nutzt nur die vorhandenen Secrets `ONE_URL`, `ONE_USER`, `ONE_PASS`.
 
 - Zeitraum: die nächsten 3 Tage (`SYNC_SPORT_DAYS`), Sendungen ab 3 Stunden vor dem Lauf.
-- Strenge Erkennung nur über Titel, Untertitel und EPG-Kategorie. Die Beschreibung zählt nie (z. B. „Wer stiehlt mir die Show?“ bleibt draußen, „NFL: …“ auf RTL kommt rein). Teleshopping, Nachrichten, Magazine und Krimis werden aussortiert.
+- Strenge Erkennung nur über Titel, Untertitel und EPG-Kategorie. Die Beschreibung zählt nie (z. B. „Wer stiehlt mir die Show?“ bleibt draußen, „NFL: …“ auf RTL kommt rein). Teleshopping, Nachrichten, Magazine und Krimis werden aussortiert. Seit 0.2.12 zählt der Sendername nie: „Hausmeister Krause“ oder „Garagengold“ auf Sport1/Magenta bleiben draußen. „Team A – Team B“ zählt nur mit Sport-Kategorie oder erkennbaren Mannschaften (z. B. „FC …“, „Bayern – Dortmund“). Fußball bis runter zur Kreisliga ist drin. Dieselben Regeln nutzt der Player (gemeinsame Testfälle `tests/fixtures/sport_cases.json`).
 - Begrenzt auf `SYNC_SPORT_BUDGET_SEC` (Standard 300 s) und `SYNC_SPORT_MAX_MB` (Standard 400 MB). Klappt etwas nicht, bleibt die alte Datei stehen. Der Lauf schlägt deshalb nicht fehl.
 - Der Player lädt die Datei höchstens alle 30 Minuten. Er ordnet die Sendungen über `epg` (= `epg_channel_id`) oder den Sendernamen den eigenen Sendern zu. Ist die Datei älter als 36 Stunden, fehlt sie oder passt nichts, nimmt er sein lokales EPG.
 - Lokal: `python3 scripts/sync_meta.py --data-dir data --sport-only`. Im TMDB-Abgleich lässt sich der Schritt mit `SYNC_SPORT=1` mitlaufen lassen; im nächtlichen Workflow ist er aus (`SYNC_SPORT: "0"`), damit nicht zwei Jobs dieselbe Datei pushen.
@@ -98,10 +98,10 @@ Format (Zeiten in UTC-Sekunden):
 {"v": 1, "generatedAt": 1794751200, "source": "one-xmltv", "days": 3,
  "items": [{"epg": "skysportbundesliga1.de", "ch": ["DE: Sky Sport Bundesliga 1 HD"],
             "title": "Bayern München – Borussia Dortmund", "start": 1794749400, "end": 1794759600,
-            "kind": "bl", "league": "Bundesliga"}]}
+            "kind": "bl", "league": "Bundesliga", "cat": "Sport"}]}
 ```
 
-`kind`: `bl`, `bl2`, `cl`, `dfb`, `pl`, `fb` (anderer Fußball), `f1`, `moto`, `nfl`, `nba`, `ih` (Eishockey), `tennis`, `box`, `hb`, `darts`, `other`.
+`cat` (optional) = EPG-Sportkategorie. `kind`: `bl`, `bl2`, `cl`, `dfb`, `pl`, `fb` (anderer Fußball), `f1`, `moto`, `nfl`, `nba`, `ih` (Eishockey), `tennis`, `box`, `hb`, `darts`, `other`.
 
 ## Hinweise
 
