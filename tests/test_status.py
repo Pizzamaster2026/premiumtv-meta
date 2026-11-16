@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for data/status.json. No IPTV, no TMDB, no GitHub."""
+"""Unit tests for data/status.json and live status-branch publish. No IPTV, no TMDB, no GitHub."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -33,7 +34,6 @@ def sample_groups():
 
 
 def sample_misses():
-    # title_key is typ + cleaned query + year — use the real function
     k = sync_meta.title_key("movie", "Forrest Gump", "1994")
     return {k: {"tmdbId": None, "query": "Forrest Gump", "year": "1994", "type": "movie"}}
 
@@ -52,20 +52,76 @@ def main() -> int:
     expect("one movie shared + pending", one["movies"]["total"] == 2 and one["movies"]["withTmdb"] == 1 and one["movies"]["pending"] == 1, one)
     expect("one has no series key", "series" not in one, one)
 
+    # no token, no network
+    for k in ("GITHUB_TOKEN", "GITHUB_REPOSITORY"):
+        os.environ.pop(k, None)
+    sync_meta.live_publisher = None
+    sync_meta._last_live_push = 0.0
+
     stats = {"new": 2, "refreshed": 0, "tmdbCalls": 9, "partial": False, "budgetStopped": False}
     with tempfile.TemporaryDirectory() as td:
         path = sync_meta.write_status(Path(td), groups, misses, stats, partial=False)
         expect("file written", path.is_file() and path.name == "status.json")
         doc = json.loads(path.read_text(encoding="utf-8"))
-        expect("no secrets", "api_key" not in json.dumps(doc).lower() and "token" not in json.dumps(doc).lower())
+        blob = json.dumps(doc).lower()
+        expect("no secrets", "api_key" not in blob and "github_pat" not in blob and "token" not in blob)
         expect("counts", doc["titles"] == 4 and doc["withTmdb"] == 2 and doc["pending"] == 1 and doc["noMatch"] == 1, doc)
         expect("phase done", doc["phase"] == "done" and doc["running"] is False, doc)
-        expect("progress processed", doc["progress"]["processed"] == 3 and doc["progress"]["total"] == 4, doc)
+        expect("progress processed default", doc["progress"]["processed"] == 3 and doc["progress"]["total"] == 4, doc)
         expect("updatedAt iso", "T" in doc["updatedAt"] and doc["updatedAt"].endswith("Z"), doc["updatedAt"])
 
         path2 = sync_meta.write_status(Path(td), groups, misses, {**stats, "budgetStopped": True, "partial": True}, partial=True)
         doc2 = json.loads(path2.read_text(encoding="utf-8"))
         expect("phase tmdb when partial", doc2["phase"] == "tmdb" and doc2["running"] is True, doc2)
+
+        # this-run open/queried/elapsed
+        live_stats = {**stats, "openTotal": 9400, "queried": 4120, "elapsedSec": 34 * 60, "phase": "tmdb", "partial": True}
+        path3 = sync_meta.write_status(Path(td), groups, misses, live_stats, partial=True)
+        doc3 = json.loads(path3.read_text(encoding="utf-8"))
+        expect("live progress 4120/9400", doc3["progress"]["processed"] == 4120 and doc3["progress"]["total"] == 9400 and doc3["progress"]["remaining"] == 5280, doc3["progress"])
+        expect("elapsed sec", doc3["progress"]["elapsedSec"] == 2040, doc3["progress"])
+        expect("open fields", doc3.get("openTotal") == 9400 and doc3.get("queried") == 4120, doc3)
+
+    # live publisher hook + throttle
+    pushed = []
+    sync_meta._last_live_push = 0.0
+    os.environ["SYNC_STATUS_PUSH_SEC"] = "30"
+
+    def hook(doc):
+        pushed.append(doc)
+        return True
+
+    sync_meta.live_publisher = hook
+    with tempfile.TemporaryDirectory() as td:
+        st = {"new": 1, "openTotal": 100, "queried": 1, "elapsedSec": 10, "partial": True}
+        sync_meta.write_status(Path(td), groups, misses, st, partial=True, force_live=True)
+        expect("first live push", len(pushed) == 1 and pushed[0]["progress"]["processed"] == 1, len(pushed))
+        st["queried"] = 2
+        sync_meta.write_status(Path(td), groups, misses, st, partial=True)  # throttled
+        expect("throttled no second push", len(pushed) == 1, len(pushed))
+        st["queried"] = 100
+        st["partial"] = False
+        sync_meta.write_status(Path(td), groups, misses, {**st, "budgetStopped": False}, partial=False)  # final forces
+        expect("final force push", len(pushed) == 2 and pushed[1]["running"] is False, (len(pushed), pushed[-1].get("running")))
+        expect("hook docs have no token", all("token" not in json.dumps(d).lower() for d in pushed))
+
+    # no hook, no token: publish_live_status is a no-op (does not contact GitHub)
+    sync_meta.live_publisher = None
+    sync_meta._last_live_push = 0.0
+    os.environ.pop("GITHUB_TOKEN", None)
+    os.environ.pop("GITHUB_REPOSITORY", None)
+    expect("publish without token is false", sync_meta.publish_live_status({"phase": "tmdb"}) is False)
+
+    # off switch
+    os.environ["SYNC_STATUS_BRANCH_PUSH"] = "0"
+    called = []
+    sync_meta.live_publisher = lambda d: called.append(d) or True
+    # hook is used first, before the env check... actually publish_live_status checks hook first.
+    # Test live_push_enabled instead.
+    expect("push can be disabled", sync_meta.live_push_enabled() is False)
+    os.environ.pop("SYNC_STATUS_BRANCH_PUSH", None)
+    expect("push enabled by default", sync_meta.live_push_enabled() is True)
+    sync_meta.live_publisher = None
 
     print("ALL PASS")
     return 0
