@@ -43,10 +43,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from title import clean, extract_tmdb_id, extract_year, title_key  # noqa: E402
+from title import clean, extract_tmdb_id, extract_year, looks_adult, names_equivalent, search_queries, title_key  # noqa: E402
 
 REFRESH_DAYS = 30
 MISS_DAYS = 14
+# Bump when search fallbacks change so non-adult misses can be tried once more.
+SEARCH_REV = 2
+DEFAULT_REMATCH_MAX = 1500
 TMDB_DEFAULT_BASE = "https://api.themoviedb.org/3"
 LANGUAGE = "de-DE"
 CAST_MAX = 12
@@ -559,18 +562,39 @@ class TmdbClient:
             raise RuntimeError(f"TMDB {path} von {mask_url(self.base)} fehlgeschlagen: {type(e).__name__}") from e
 
     def search(self, typ: str, query: str, year: str) -> Optional[int]:
+        """Search TMDB. Fallbacks (no year, umlaut variant, en-US) only accept a safe title match."""
         tv = typ == "series"
         path = "/search/tv" if tv else "/search/movie"
-        params = {"query": query, "language": LANGUAGE, "include_adult": "false", "page": "1"}
-        if year:
-            params["first_air_date_year" if tv else "year"] = year
-        data = self.get(path, params)
-        hit = _pick_search(data, query)
+        year_key = "first_air_date_year" if tv else "year"
+        queries = search_queries(query)
+        langs = [LANGUAGE]
+        if not LANGUAGE.lower().startswith("en"):
+            langs.append("en-US")
+
+        def run(q: str, y: str, lang: str, strict: bool) -> Optional[dict]:
+            params = {"query": q, "language": lang, "include_adult": "false", "page": "1"}
+            if y:
+                params[year_key] = y
+            return _pick_search(self.get(path, params), q, strict=strict)
+
+        # Primary: current language, with year if we have one; existing acceptance rules.
+        hit = run(queries[0], year, LANGUAGE, False)
         if not hit and year:
-            params.pop("first_air_date_year", None)
-            params.pop("year", None)
-            data = self.get(path, params)
-            hit = _pick_search(data, query)
+            hit = run(queries[0], "", LANGUAGE, True)
+        if not hit:
+            for q in queries:
+                for lang in langs:
+                    if q == queries[0] and lang == LANGUAGE:
+                        continue
+                    hit = run(q, year, lang, True)
+                    if hit:
+                        break
+                    if year:
+                        hit = run(q, "", lang, True)
+                    if hit:
+                        break
+                if hit:
+                    break
         if not hit:
             return None
         try:
@@ -587,7 +611,7 @@ class TmdbClient:
         return normalize_details(typ, data)
 
 
-def _pick_search(data: Any, query: str) -> Optional[dict]:
+def _pick_search(data: Any, query: str, strict: bool = False) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
     results = data.get("results")
@@ -600,6 +624,10 @@ def _pick_search(data: Any, query: str) -> Optional[dict]:
         names = [r.get("title"), r.get("name"), r.get("original_title"), r.get("original_name")]
         if any(t and str(t).lower().strip() == want for t in names):
             return r
+        if any(t and names_equivalent(t, query) for t in names):
+            return r
+    if strict:
+        return None
     return results[0] if isinstance(results[0], dict) else None
 
 
@@ -872,7 +900,7 @@ def content_fingerprint(entries: dict, index_body: dict) -> str:
 def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
     """Split unique titles (and per-provider views) into withTmdb / noMatch / pending."""
     def empty() -> dict:
-        return {"total": 0, "withTmdb": 0, "noMatch": 0, "pending": 0}
+        return {"total": 0, "withTmdb": 0, "noMatch": 0, "pending": 0, "adultSkipped": 0}
 
     def kind_of(g: dict) -> str:
         if g.get("resolved"):
@@ -880,9 +908,12 @@ def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
         miss_key = title_key(g["type"], g["query"], g["year"])
         return "noMatch" if miss_key in misses else "pending"
 
-    def add(block: dict, typ: str, kind: str) -> None:
+    def add(block: dict, typ: str, kind: str, adult: bool = False) -> None:
         slot = "movies" if typ == "movie" else "series"
         row = block.setdefault(slot, empty())
+        if adult:
+            row["adultSkipped"] += 1
+            return
         row["total"] += 1
         row[kind] += 1
 
@@ -895,9 +926,13 @@ def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
     providers: dict[str, dict] = {}
     for g in groups:
         typ = g.get("type") or "movie"
-        kind = kind_of(g)
-        overall["total"] += 1
-        overall[kind] += 1
+        adult = is_adult_group(g)
+        kind = "pending" if adult else kind_of(g)
+        if adult:
+            overall["adultSkipped"] += 1
+        else:
+            overall["total"] += 1
+            overall[kind] += 1
         seen = set()
         for ref in g.get("refs") or []:
             if not isinstance(ref, dict):
@@ -906,7 +941,10 @@ def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
             if not pid or pid in seen:
                 continue
             seen.add(pid)
-            add(providers.setdefault(pid, {}), typ, kind)
+            block = providers.setdefault(pid, {"adultSkipped": 0})
+            if adult:
+                block["adultSkipped"] = int(block.get("adultSkipped") or 0) + 1
+            add(block, typ, kind, adult=adult)
     with_pct(overall)
     for block in providers.values():
         for slot in ("movies", "series"):
@@ -959,6 +997,7 @@ def build_status(
         "noMatch": no_match,
         "pending": pending,
         "coveragePct": overall.get("pct") or 0.0,
+        "adultSkipped": int(overall.get("adultSkipped") or 0),
         "providers": cov["providers"],
         "progress": progress,
     }
@@ -1134,8 +1173,49 @@ def apply_existing_to_groups(groups: list[dict], entries: dict, prev_by_title: d
     return n
 
 
+def is_adult_group(g: dict) -> bool:
+    if looks_adult(g.get("query") or ""):
+        return True
+    for ref in g.get("refs") or []:
+        if isinstance(ref, dict) and looks_adult(ref.get("name") or ""):
+            return True
+    return False
+
+
+def miss_query_changed(miss: dict, g: dict) -> bool:
+    """True if the stored miss was recorded under a weaker cleaning of the title."""
+    stored = (miss or {}).get("query") or ""
+    stored_year = str((miss or {}).get("year") or "")
+    new_q = g.get("query") or ""
+    new_y = str(g.get("year") or "")
+    # Re-cleaning the stored query catches misses recorded before a cleaner upgrade.
+    old = clean(stored, stored_year)
+    return stored != new_q or old["q"] != new_q or (new_y and stored_year and stored_year != new_y and old["year"] != new_y)
+
+
+def miss_should_retry(miss: Optional[dict], g: dict, now: datetime) -> bool:
+    """Retry a miss if it expired, the cleaned query changed, or search fallbacks were added."""
+    if not miss:
+        return True
+    if not is_fresh(miss, now, MISS_DAYS):
+        return True
+    # Adult titles stay unmatched (include_adult=false). Do not churn them
+    # when only a quality tag such as -1080p was stripped from the stored query.
+    if miss_query_changed(miss, g) and not is_adult_group(g):
+        return True
+    try:
+        rev = int(miss.get("searchRev") or 0)
+    except (TypeError, ValueError):
+        rev = 0
+    if rev < SEARCH_REV and not is_adult_group(g):
+        return True
+    return False
+
+
 def needs_tmdb_lookup(g: dict, entries: dict, misses: dict, prev_by_title: dict, now: datetime) -> bool:
     """True if this run still needs a TMDB search or details call for the title."""
+    if is_adult_group(g):
+        return False
     typ, query, year = g["type"], g["query"], g["year"]
     tid = g.get("tmdb_id")
     existing_key = existing_entry_key(g, entries, prev_by_title)
@@ -1143,7 +1223,7 @@ def needs_tmdb_lookup(g: dict, entries: dict, misses: dict, prev_by_title: dict,
     miss = misses.get(title_key(typ, query, year))
     if entry and is_fresh(entry, now, REFRESH_DAYS):
         return False
-    if not tid and miss and is_fresh(miss, now, MISS_DAYS):
+    if not tid and miss and not miss_should_retry(miss, g, now):
         return False
     return True
 
@@ -1385,9 +1465,15 @@ def sync(data_dir: Path) -> int:
     started = time.monotonic()
     progress_since_ckpt = 0
     budget_stopped = False
+    rematch_max = max(0, int(env_number("SYNC_REMATCH_MAX", DEFAULT_REMATCH_MAX, int)))
+    rematched = 0
     open_total = sum(1 for g in groups if needs_tmdb_lookup(g, entries, misses, prev_by_title, now))
     cached = apply_existing_to_groups(groups, entries, prev_by_title)
+    adult_n = sum(1 for g in groups if is_adult_group(g))
     log(f"{open_total} Titel in diesem Lauf noch abzufragen, {cached} schon mit TMDB-Daten im Cache.")
+    log(f"Erneute Suche nach bereinigten Fehlversuchen: höchstens {rematch_max} in diesem Lauf.")
+    if adult_n:
+        log(f"{adult_n} Erwachsenenfilme werden nicht bei TMDB gesucht und nicht in der Abdeckung gezählt.")
     cap_min = env_number("SYNC_TIME_BUDGET_MIN", DEFAULT_TIME_BUDGET_MIN, float)
     log(
         f"Zeitbudget: {budget_min:g} Min. für TMDB "
@@ -1483,6 +1569,10 @@ def sync(data_dir: Path) -> int:
         typ, query, year = g["type"], g["query"], g["year"]
         tid = g["tmdb_id"]
         miss_key = title_key(typ, query, year)
+        if is_adult_group(g):
+            # Keep any already attached cache hit for the player; never search or add a miss.
+            skipped += 1
+            continue
         existing_key = entry_key(typ, tid) if tid else None
         if not existing_key:
             # Already resolved in a previous run (by cleaned title, including other providers).
@@ -1507,10 +1597,17 @@ def sync(data_dir: Path) -> int:
             skipped += 1
             g["resolved"] = existing_key
             continue
-        if not tid and miss and is_fresh(miss, now, MISS_DAYS):
+        retry_miss = miss_should_retry(miss, g, now) if miss else bool(not tid)
+        if not tid and miss and not retry_miss:
             skipped += 1
             g["resolved"] = None
             continue
+        if not tid and miss and retry_miss:
+            if rematched >= rematch_max:
+                skipped += 1
+                g["resolved"] = None
+                continue
+            rematched += 1
 
         # Stop starting new TMDB lookups once the budget is exhausted, but
         # still attach already cached matches so later pruning stays correct.
@@ -1535,7 +1632,7 @@ def sync(data_dir: Path) -> int:
                 fetched += 1
 
         if not tid:
-            misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at}
+            misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at, "searchRev": SEARCH_REV}
             g["resolved"] = None
             new_misses += 1
             progress_since_ckpt += 1
@@ -1565,7 +1662,7 @@ def sync(data_dir: Path) -> int:
             continue
         fetched += 1
         if not detail or not detail.get("tmdbId"):
-            misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at}
+            misses[miss_key] = {"tmdbId": None, "query": query, "year": year, "type": typ, "updatedAt": generated_at, "searchRev": SEARCH_REV}
             g["resolved"] = None
             new_misses += 1
             progress_since_ckpt += 1

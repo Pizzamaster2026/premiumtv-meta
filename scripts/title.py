@@ -17,19 +17,50 @@ _PREFIX = re.compile(
     r"|[A-Z]{2}\s*\|\s*"
     r")\s*"
 )
+# (DE-), (EN -), (XXX-) as seen on PremiumTV lists
+_COUNTRY_PAREN = re.compile(
+    r"^\s*\(\s*(?:DE|EN|GER|ENG|DEU|US|FR|IT|ES|TR|AT|CH|NL|PL|RU|UA|GR|MULTI)\s*-?\s*\)\s*",
+    re.I,
+)
+# Leading catalogue ranks: "11- Title", "-11- Title", "01 | Title", "12. Title"
+# Do not strip a bare number that is part of the name ("6 Ballons", "1917", "2012").
+_RANK = re.compile(r"^\s*-?\d{1,4}\s*[-–.:|)/]+\s+")
 _PAREN_YEAR = re.compile(r"\((19|20)\d{2}\)|\[(19|20)\d{2}\]")
 _BARE_YEAR = re.compile(r"[\s.]((19|20)\d{2})\s*$")
 _LANG_PAREN = re.compile(r"\((?:[A-Z]{2,3})\)")
 _BRACKETS = re.compile(r"\[[^\]]*\]")
 _TAG_PAREN = re.compile(
     r"\((?:[^)]*\b(?:DE|EN|GER|ENG|DEU|MULTI|OmU|OMU|DUB|SUB|4K|UHD|FHD|HD|SD|"
-    r"HDR|HEVC|H\.?265|x265|1080p|720p|2160p)\b[^)]*)\)",
+    r"HDR|HEVC|H\.?265|x265|1080p|720p|2160p|3D|WEB-?DL)\b[^)]*)\)",
     re.I,
 )
 _TAGS = re.compile(
-    r"(?:^|\s)(?:4K|UHD|FHD|HD|SD|HDR10?\+?|DV|HEVC|H\.?26[45]|x26[45]|"
-    r"1080p|720p|2160p|MULTI|GERMAN|GER|DEU|DE|ENG|EN|OmU|OMU|DL|AC3|DTS|"
-    r"ATMOS|Dolby|NEU|NEW)(?=\s|$|[|\-–])"
+    r"(?:^|[\s.\-])(?:4K|UHD|FHD|HD|SD|HDR10?\+?|DV|HEVC|H\.?26[45]|x26[45]|"
+    r"1080p|720p|2160p|3D|MULTI|GERMAN|GER|DEU|DE|ENG|EN|OmU|OMU|DL|AC3|DTS|"
+    r"ATMOS|Dolby|NEU|NEW)(?=\s|$|[|\-–.])"
+)
+_MULTI_SUB = re.compile(
+    r"(?:^|[\s.\-])(?:Multi(?:[\s-]?Sub(?:s|bed)?)?|Multi(?:[\s-]?Audio)?|"
+    r"Multi(?:[\s-]?Lang(?:uage)?)?|WEB-?DL|WEBRip|Blu-?Ray|REMUX|TRUEHD)"
+    r"(?=\s|$|[|\-–.])",
+    re.I,
+)
+# German articles/words: only then we invent an umlaut search variant (ae/oe/ue).
+_GERMAN_HINT = re.compile(
+    r"\b(?:Der|Die|Das|Dem|Den|Des|Ein|Eine|Einen|Einer|Und|Oder|Von|Vom|Zum|Zur|"
+    r"Mit|Auf|Aus|Für|Fuer|Im|Ist|Nicht|Kein|Keine|Kein|Weg|Gegen|Über|Ueber)\b",
+    re.I,
+)
+# Do not treat the "ue" inside "euer"/"Steuer" as an umlaut.
+_AE_OE_UE = re.compile(r"(?<![eE])(?:ae|oe|ue)", re.I)
+# Words where ae/oe/ue is not a German umlaut (zuerst → zürst, Guests → Güsts).
+_UMLAUT_SKIP_WORD = re.compile(
+    r"(?i)^(?:zuerst|guests?|influencer|sequences?|consequences?|questionnaire|"
+    r"unique|dialogue|catalog(?:ue)?|source|true|blue|due|queue)$"
+)
+# Strong transliteration even without Der/Die (Leberkaes, Eiskoenigin).
+_STRONG_TRANSLIT = re.compile(
+    r"(?i)(?:(?<![eE])(?:ae|oe|ue)(?:ck|ch|ll|ss|nig|dchen|hrte?n?|chte|cker|wen|lle|rter|tzt)|kaes)"
 )
 _PIPES = re.compile(r"[|_]+")
 _TRAIL_DASH = re.compile(r"\s*[-–:]\s*$")
@@ -49,8 +80,10 @@ def clean(name: object, year: object = "") -> dict:
     s = _ZERO_WIDTH.sub(" ", str(name or "")).strip()
     y = extract_year(year)
 
-    for _ in range(3):
-        s2 = _PREFIX.sub("", s, count=1)
+    for _ in range(6):
+        s2 = _COUNTRY_PAREN.sub("", s, count=1)
+        s2 = _PREFIX.sub("", s2, count=1)
+        s2 = _RANK.sub("", s2, count=1)
         if s2 == s:
             break
         s = s2
@@ -71,11 +104,72 @@ def clean(name: object, year: object = "") -> dict:
     s = _BRACKETS.sub(" ", s)
     s = _TAG_PAREN.sub(" ", s)
     s = _TAGS.sub(" ", s)
+    s = _MULTI_SUB.sub(" ", s)
     s = _PIPES.sub(" ", s)
     s = _TRAIL_DASH.sub("", s)
     s = _LEAD_DASH.sub("", s)
     s = _SPACES.sub(" ", s).strip()
     return {"q": s, "year": y}
+
+
+# Leading catalogue marker as used on PremiumTV: (XXX-) or (XXX).
+# Not a bare "xXx" / "xXx:" title (Vin Diesel), and not the word mid-title.
+_ADULT_PREFIX = re.compile(r"^\s*\(\s*XXX\s*-?\s*\)", re.I)
+
+
+def looks_adult(name: object) -> bool:
+    """True for obvious adult catalogue prefixes such as (XXX-) or XXX- at the start."""
+    return bool(_ADULT_PREFIX.search(str(name or "")))
+
+
+def _umlaut_replace(q: str) -> str:
+    table = {"ae": "ä", "oe": "ö", "ue": "ü", "Ae": "Ä", "Oe": "Ö", "Ue": "Ü", "AE": "Ä", "OE": "Ö", "UE": "Ü"}
+
+    def repl(m: re.Match) -> str:
+        return table.get(m.group(0), m.group(0))
+
+    def word(m: re.Match) -> str:
+        w = m.group(0)
+        core = re.sub(r"^[^A-Za-zÄÖÜäöüß]+|[^A-Za-zÄÖÜäöüß]+$", "", w)
+        if _UMLAUT_SKIP_WORD.match(core):
+            return w
+        return _AE_OE_UE.sub(repl, w)
+
+    return re.sub(r"\S+", word, q)
+
+
+def umlaut_variant(query: str) -> str:
+    """German ae/oe/ue → ä/ö/ü, only when the title already looks German."""
+    q = (query or "").strip()
+    if not q or not _AE_OE_UE.search(q):
+        return q
+    if not _GERMAN_HINT.search(q) and not _STRONG_TRANSLIT.search(q):
+        return q
+    alt = _umlaut_replace(q)
+    return alt if alt != q else q
+
+
+def search_queries(query: str) -> list[str]:
+    """Primary cleaned query plus a safe umlaut variant, without duplicates."""
+    q = (query or "").strip()
+    out: list[str] = []
+    for cand in (q, umlaut_variant(q)):
+        if cand and cand not in out:
+            out.append(cand)
+    return out or [q]
+
+
+def names_equivalent(a: object, b: object) -> bool:
+    """Loose equality for TMDB search hits (case, punctuation, umlauts)."""
+    def norm(x: object) -> str:
+        s = str(x or "").lower().strip()
+        s = _umlaut_replace(s)
+        s = s.replace("ß", "ss")
+        s = re.sub(r"['’`´]", "", s)
+        s = re.sub(r"[^\w]+", " ", s, flags=re.UNICODE)
+        return re.sub(r"\s+", " ", s).strip()
+    na, nb = norm(a), norm(b)
+    return bool(na and na == nb)
 
 
 def title_key(kind: str, name: object, year: object = "") -> str:
