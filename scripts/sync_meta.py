@@ -868,6 +868,112 @@ def content_fingerprint(entries: dict, index_body: dict) -> str:
     return json.dumps({"e": entries, "i": slim_idx}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+
+def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
+    """Split unique titles (and per-provider views) into withTmdb / noMatch / pending."""
+    def empty() -> dict:
+        return {"total": 0, "withTmdb": 0, "noMatch": 0, "pending": 0}
+
+    def kind_of(g: dict) -> str:
+        if g.get("resolved"):
+            return "withTmdb"
+        miss_key = title_key(g["type"], g["query"], g["year"])
+        return "noMatch" if miss_key in misses else "pending"
+
+    def add(block: dict, typ: str, kind: str) -> None:
+        slot = "movies" if typ == "movie" else "series"
+        row = block.setdefault(slot, empty())
+        row["total"] += 1
+        row[kind] += 1
+
+    def with_pct(row: dict) -> dict:
+        total = row["total"]
+        row["pct"] = round(100.0 * row["withTmdb"] / total, 1) if total else 0.0
+        return row
+
+    overall = empty()
+    providers: dict[str, dict] = {}
+    for g in groups:
+        typ = g.get("type") or "movie"
+        kind = kind_of(g)
+        overall["total"] += 1
+        overall[kind] += 1
+        seen = set()
+        for ref in g.get("refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            pid = str(ref.get("provider") or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            add(providers.setdefault(pid, {}), typ, kind)
+    with_pct(overall)
+    for block in providers.values():
+        for slot in ("movies", "series"):
+            if slot in block:
+                with_pct(block[slot])
+    return {"overall": overall, "providers": providers}
+
+
+def build_status(
+    *,
+    groups: list[dict],
+    misses: dict,
+    stats: dict,
+    updated_at: str,
+    phase: str,
+    running: bool,
+) -> dict:
+    cov = coverage_from_groups(groups, misses)
+    overall = cov["overall"]
+    titles = int(overall["total"])
+    with_tmdb = int(overall["withTmdb"])
+    no_match = int(overall["noMatch"])
+    pending = int(overall["pending"])
+    return {
+        "version": 1,
+        "updatedAt": updated_at,
+        "phase": phase,
+        "running": running,
+        "partial": bool(stats.get("partial")),
+        "budgetStopped": bool(stats.get("budgetStopped")),
+        "titles": titles,
+        "withTmdb": with_tmdb,
+        "noMatch": no_match,
+        "pending": pending,
+        "coveragePct": overall.get("pct") or 0.0,
+        "providers": cov["providers"],
+        "progress": {
+            "processed": with_tmdb + no_match,
+            "total": titles,
+            "new": int(stats.get("new") or 0),
+            "refreshed": int(stats.get("refreshed") or 0),
+            "tmdbCalls": int(stats.get("tmdbCalls") or 0),
+        },
+    }
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, partial: bool) -> Path:
+    """Small public data/status.json for the Manager dashboard. Never contains secrets."""
+    phase = "tmdb" if partial else ("budget_stopped" if stats.get("budgetStopped") else "done")
+    doc = build_status(
+        groups=groups,
+        misses=misses,
+        stats=stats,
+        updated_at=utc_now_iso(),
+        phase=phase,
+        running=partial,
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "status.json"
+    _atomic_write(path, doc)
+    return path
+
+
 def write_outputs(data_dir: Path, entries: dict, by_id: dict, by_title: dict, misses: dict, generated_at: str, stats: dict) -> list[Path]:
     data_dir.mkdir(parents=True, exist_ok=True)
     # Drop unused shard/meta files after write
@@ -1160,6 +1266,7 @@ def sync(data_dir: Path) -> int:
             "budgetStopped": budget_stopped,
             "sources": sources,
         }
+        write_status(data_dir, groups, misses, stats_partial, partial=True)
         write_outputs(data_dir, entries, by_id, by_title, misses, generated_at, stats_partial)
         (data_dir / ".changed").write_text("1\n", encoding="utf-8")
         log(f"Zwischenstand geschrieben ({len(entries)} Einträge).")
@@ -1318,9 +1425,11 @@ def sync(data_dir: Path) -> int:
     old_fp = content_fingerprint(old_entries, {k: old_idx.get(k) for k in ("byId", "byTitle", "misses")})
     new_fp = content_fingerprint(entries, index_preview)
     if old_fp == new_fp:
-        log("Keine inhaltlichen Änderungen – Dateien bleiben unverändert, kein Commit nötig.")
+        write_status(data_dir, groups, misses, stats, partial=False)
+        log("Keine inhaltlichen Änderungen am Cache – Statusdatei wird trotzdem aktualisiert.")
         return 0
 
+    write_status(data_dir, groups, misses, stats, partial=False)
     write_outputs(data_dir, entries, by_id, by_title, misses, generated_at, stats)
     # marker file for the workflow
     (data_dir / ".changed").write_text("1\n", encoding="utf-8")
