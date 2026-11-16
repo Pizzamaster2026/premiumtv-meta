@@ -10,6 +10,8 @@
   <channel id="eurosport1.de"><display-name>DE: Eurosport 1 HD</display-name></channel>
   <channel id="sport1.de"><display-name>DE: Sport1 HD</display-name></channel>
   <channel id="das.erste.de"><display-name>DE: Das Erste HD</display-name></channel>
+  <channel id="magentasport1.de"><display-name>┃DE┃ MAGENTA SPORT 1 HD</display-name></channel>
+  <channel id="superrtl.de"><display-name>DE: Super RTL HD</display-name></channel>
   <programme start="20261115140000 +0100" stop="20261115163000 +0100" channel="prosieben.de">
     <title lang="de">Wer stiehlt mir die Show?</title>
     <desc lang="de">Joko und Klaas gegen Promis aus Fußball, Formel 1 und Bundesliga.</desc>
@@ -58,6 +60,18 @@
   </programme>
   <programme start="20261115200000 +0100" stop="20261115233000 +0100" channel="sport1.de">
     <title lang="de">Darts: PDC Grand Slam of Darts</title>
+  </programme>
+  <!-- v0.2.12 misfires (Tom 16.11.): sport channel + dash / provider category "Sport" is NOT enough -->
+  <programme start="20261115140000 +0100" stop="20261115150000 +0100" channel="sport1.de">
+    <title lang="de">Hausmeister Krause - Ordnung muss sein</title>
+    <category lang="de">Sport</category>
+  </programme>
+  <programme start="20261115140000 +0100" stop="20261115160000 +0100" channel="magentasport1.de">
+    <title lang="de">Garagengold</title>
+    <category lang="de">Sport</category>
+  </programme>
+  <programme start="20261115140000 +0100" stop="20261115143000 +0100" channel="superrtl.de">
+    <title lang="de">SpongeBob Schwammkopf</title>
   </programme>
   <programme start="20261115190000 +0100" stop="20261115193000 +0100" channel="sport1.de">
     <title lang="de">Sport1 News</title>
