@@ -3,6 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 echo "== title cleaning =="
 python3 test_title.py
+echo "== title rematch / safe pick =="
+python3 test_rematch.py
 echo "== status.json =="
 python3 test_status.py
 echo "== sync (mock only) =="

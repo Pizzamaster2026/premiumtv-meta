@@ -45,6 +45,7 @@ def main() -> int:
     o = cov["overall"]
     expect("overall totals", o["total"] == 4 and o["withTmdb"] == 2 and o["noMatch"] == 1 and o["pending"] == 1, o)
     expect("overall pct 50", o["pct"] == 50.0, o)
+    expect("no adult in sample", o.get("adultSkipped", 0) == 0, o)
     ptv = cov["providers"]["premiumtv"]
     expect("ptv movies 1/2 noMatch", ptv["movies"]["total"] == 2 and ptv["movies"]["withTmdb"] == 1 and ptv["movies"]["noMatch"] == 1, ptv)
     expect("ptv series 100", ptv["series"]["withTmdb"] == 1 and ptv["series"]["pct"] == 100.0, ptv)
@@ -66,6 +67,7 @@ def main() -> int:
         blob = json.dumps(doc).lower()
         expect("no secrets", "api_key" not in blob and "github_pat" not in blob and "token" not in blob)
         expect("counts", doc["titles"] == 4 and doc["withTmdb"] == 2 and doc["pending"] == 1 and doc["noMatch"] == 1, doc)
+        expect("adultSkipped field", doc.get("adultSkipped", 0) == 0, doc)
         expect("phase done", doc["phase"] == "done" and doc["running"] is False, doc)
         expect("progress processed default", doc["progress"]["processed"] == 3 and doc["progress"]["total"] == 4, doc)
         expect("updatedAt iso", "T" in doc["updatedAt"] and doc["updatedAt"].endswith("Z"), doc["updatedAt"])
@@ -156,6 +158,31 @@ def main() -> int:
         doc = json.loads(path.read_text(encoding="utf-8"))
         expect("mid-run coverage uses cache", doc["withTmdb"] == 2 and doc["noMatch"] == 1 and doc["pending"] == 1 and doc["coveragePct"] == 50.0, doc)
         expect("mid-run progress 0/1 still shown", doc["progress"]["processed"] == 0 and doc["progress"]["total"] == 1, doc["progress"])
+
+    # Adult titles are left out of coverage and do not pull percentages down.
+    adult_groups = sample_groups() + [
+        {"type": "movie", "query": "(XXX-) Tiny4K - Foo", "year": "", "resolved": None,
+         "refs": [{"provider": "premiumtv", "type": "movie", "id": "9", "name": "(XXX-) Tiny4K - Foo", "year": ""}]},
+        {"type": "movie", "query": "(XXX-) Already Cached", "year": "2017", "resolved": "movie:999",
+         "refs": [{"provider": "premiumtv", "type": "movie", "id": "10", "name": "(XXX-) Already Cached - 2017", "year": "2017"}]},
+    ]
+    adult_misses = dict(sample_misses())
+    adult_misses[sync_meta.title_key("movie", "(XXX-) Tiny4K - Foo", "")] = {
+        "tmdbId": None, "query": "(XXX-) Tiny4K - Foo", "year": "", "type": "movie"
+    }
+    acov = sync_meta.coverage_from_groups(adult_groups, adult_misses)
+    ao = acov["overall"]
+    expect("adult excluded from totals", ao["total"] == 4 and ao["withTmdb"] == 2 and ao["noMatch"] == 1 and ao["pending"] == 1, ao)
+    expect("adult pct unchanged 50", ao["pct"] == 50.0, ao)
+    expect("adultSkipped 2", ao["adultSkipped"] == 2, ao)
+    ptv_m = acov["providers"]["premiumtv"]["movies"]
+    expect("ptv movies still 1/2", ptv_m["total"] == 2 and ptv_m["withTmdb"] == 1 and ptv_m["noMatch"] == 1, ptv_m)
+    expect("ptv adultSkipped on provider", acov["providers"]["premiumtv"]["adultSkipped"] == 2, acov["providers"]["premiumtv"])
+    with tempfile.TemporaryDirectory() as td:
+        path = sync_meta.write_status(Path(td), adult_groups, adult_misses, {"new": 0, "partial": False}, partial=False)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        expect("status titles ignore adult", doc["titles"] == 4 and doc["adultSkipped"] == 2 and doc["coveragePct"] == 50.0, doc)
+        expect("player-safe no schema break", "providers" in doc and "progress" in doc and "withTmdb" in doc, list(doc))
 
     print("ALL PASS")
     return 0
