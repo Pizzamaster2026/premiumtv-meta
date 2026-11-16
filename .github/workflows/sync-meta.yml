@@ -57,6 +57,11 @@ jobs:
           # data/sport.json is built by its own workflow (sync-sport.yml,
           # every 6 h), so the two jobs never push the same file.
           SYNC_SPORT: "0"
+          # Live progress for the Manager: force-push data/status.json to the
+          # 'status' branch every 4 minutes. Does not touch main mid-run.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_STATUS_BRANCH: status
+          SYNC_STATUS_PUSH_SEC: "240"
         run: python3 scripts/sync_meta.py --data-dir data
 
       # always(): also run after a timeout/cancel, so a mid-run checkpoint
@@ -65,8 +70,16 @@ jobs:
         if: always()
         run: |
           rm -f data/.changed
-          git add data/index.json data/meta.json data/meta-*.json data/status.json 2>/dev/null || true
+          # Add each existing output separately. A single `git add` with a missing
+          # path (there is no data/meta.json, only data/meta-*.json shards) would
+          # abort the whole add; `|| true` hid that, and `git add -u` does not
+          # pick up a newly written, still-untracked data/status.json.
           git add -u data/
+          for f in data/index.json data/status.json data/meta.json data/meta-*.json; do
+            if [ -e "$f" ]; then
+              git add -- "$f"
+            fi
+          done
           if git diff --cached --quiet; then
             echo "Keine Änderungen am Cache."
             exit 0
