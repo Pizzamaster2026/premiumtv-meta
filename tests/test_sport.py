@@ -63,15 +63,35 @@ def test_classifier_title_only():
     expect("handball", c("Handball-EM: Deutschland – Dänemark")[0] == "hb")
     expect("darts", c("Darts: PDC Grand Slam of Darts")[0] == "darts")
     expect("ski -> other", c("Ski Alpin: Weltcup in Levi")[0] == "other")
-    expect("match title on sport channel -> other", c("Alba Berlin – Bayern", "", [], "DAZN 1")[0] in ("other", "nba"))
+    # v0.2.12: the channel name never counts – a match-like title needs a sport category or recognisable teams
+    expect("match title on sport channel without category -> nothing", c("Alba Berlin – Bayern", "", [], "DAZN 1") is None)
+    expect("match title + sport category -> other", c("Alba Berlin – Bayern", "", ["Sport"], "DAZN 1")[0] in ("other", "nba"))
+    expect("Hausmeister Krause on Sport1 is no sport", c("Hausmeister Krause - Ordnung muss sein", "", ["Sport"], "DE: Sport1 HD") is None)
+    expect("Garagengold on Magenta is no sport", c("Garagengold", "", ["Sport"], "┃DE┃ MAGENTA SPORT 1 HD") is None)
+    expect("SpongeBob is no bobsleigh", c("SpongeBob Schwammkopf") is None)
+    expect("placeholder title = channel name", c("Magenta Sport 7", "", [], "┃DE┃ MAGENTA SPORT 7 HD") is None)
+    expect("placeholder against any display name", c("Magenta Sport 7", "", [], ["┃DE┃ MAGENTA SPORT 7 HD", "magentasport7.de"]) is None)
+    expect("Kreisliga is sport", c("Kreisliga A: TSV Hintertupfing - SG Oberdorf")[0] == "fb")
     expect("match title on non-sport channel without category -> nothing", c("Liebe – oder was?", "", [], "Sat.1") is None)
     expect("formel 1 magazine is not live sport", c("Formel 1 – Das Magazin") is None)
+
+
+def test_shared_cases_with_player():
+    """same expectations as the player (tests/unit/sport_cases0212.json)"""
+    cases = json.loads((ROOT / "tests" / "fixtures" / "sport_cases.json").read_text(encoding="utf-8"))["cases"]
+    bad = []
+    for title, cat, ch, exp in cases:
+        k = sport.classify(title, "", [cat] if cat else [], ch)
+        if (k[0] if k else None) != exp:
+            bad.append((title, cat, ch, k, exp))
+    expect(f"{len(cases)} shared cases", not bad, bad)
 
 
 def test_xmltv_parse_window_and_names():
     items, st, by = parsed()
     titles = sorted(t for (_e, t) in by)
-    expect("programmes counted", st["programmes"] == 17, st)
+    expect("programmes counted", st["programmes"] == 20, st)
+    expect("v0.2.12 misfires dropped", not {"Hausmeister Krause - Ordnung muss sein", "Garagengold", "SpongeBob Schwammkopf"} & set(titles), titles)
     expect("prosieben dropped", ("prosieben.de", "Wer stiehlt mir die Show?") not in by)
     expect("rtl nfl kept", by[("rtl.de", "NFL: Kansas City Chiefs – Buffalo Bills")]["kind"] == "nfl")
     expect("bundesliga kept", by[("skysportbundesliga1.de", "Bayern München – Borussia Dortmund")]["kind"] == "bl")
@@ -85,7 +105,8 @@ def test_xmltv_parse_window_and_names():
     expect("sorted by start", [i["start"] for i in items] == sorted(i["start"] for i in items))
     expect("exact set", len(items) == 9, titles)
     for i in items:
-        expect("item shape", set(i) == {"epg", "ch", "title", "start", "end", "kind", "league"}, i)
+        expect("item shape", set(i) - {"cat"} == {"epg", "ch", "title", "start", "end", "kind", "league"}, i)
+    expect("sport category passed on", by[("rtl.de", "NFL: Kansas City Chiefs – Buffalo Bills")].get("cat") == "Sport")
     expect("1 day window is shorter", len(parsed(days=1)[0]) < len(items))
 
 
@@ -214,11 +235,11 @@ def main():
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     expect("local mock only", "127.0.0.1" in base)
     mock_server.reset_catalogs()
-    tests = [test_classifier_title_only, test_xmltv_parse_window_and_names, test_xmltv_ts, test_limits,
+    tests = [test_classifier_title_only, test_shared_cases_with_player, test_xmltv_parse_window_and_names, test_xmltv_ts, test_limits,
              test_run_step_never_raises_and_keeps_old_file,
              lambda: test_sync_builds_sport_json(base), lambda: test_sync_survives_sport_failures(base),
              lambda: test_sync_sport_switch_off(base), lambda: test_sport_only_cli(base)]
-    names = ["classifier", "xmltv_parse", "xmltv_ts", "limits", "run_step", "sync_builds_sport_json",
+    names = ["classifier", "shared_cases_with_player", "xmltv_parse", "xmltv_ts", "limits", "run_step", "sync_builds_sport_json",
              "sync_survives_sport_failures", "sport_switch_off", "sport_only_cli"]
     fails = 0
     for n, t in zip(names, tests):
