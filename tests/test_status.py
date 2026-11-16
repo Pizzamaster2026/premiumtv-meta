@@ -123,6 +123,40 @@ def main() -> int:
     expect("push enabled by default", sync_meta.live_push_enabled() is True)
     sync_meta.live_publisher = None
 
+    # Mid-run snapshot must count cached TMDB hits, not treat them as pending.
+    raw = [
+        {"type": "movie", "query": "Der Pate", "year": "1972", "resolved": None,
+         "refs": [{"provider": "premiumtv", "type": "movie", "id": "1", "name": "Der Pate", "year": "1972"}]},
+        {"type": "movie", "query": "Forrest Gump", "year": "1994", "resolved": None,
+         "refs": [{"provider": "premiumtv", "type": "movie", "id": "2", "name": "Forrest Gump", "year": "1994"}]},
+        {"type": "series", "query": "Breaking Bad", "year": "2008", "resolved": None,
+         "refs": [{"provider": "one", "type": "series", "id": "3", "name": "Breaking Bad", "year": "2008"}]},
+        {"type": "movie", "query": "Noch Offen", "year": "2024", "resolved": None,
+         "refs": [{"provider": "one", "type": "movie", "id": "4", "name": "Noch Offen", "year": "2024"}]},
+    ]
+    entries = {"movie:238": {"tmdbId": 238, "title": "Der Pate"}, "tv:1396": {"tmdbId": 1396, "title": "Breaking Bad"}}
+    prev = {
+        sync_meta.title_key("movie", "Der Pate", "1972"): "movie:238",
+        sync_meta.title_key("series", "Breaking Bad", "2008"): "tv:1396",
+    }
+    mid_misses = {sync_meta.title_key("movie", "Forrest Gump", "1994"): {"tmdbId": None, "query": "Forrest Gump", "year": "1994", "type": "movie"}}
+    before = sync_meta.coverage_from_groups(raw, mid_misses)
+    expect("before apply cache is pending", before["overall"]["withTmdb"] == 0 and before["overall"]["noMatch"] == 1 and before["overall"]["pending"] == 3, before["overall"])
+    n = sync_meta.apply_existing_to_groups(raw, entries, prev)
+    expect("apply attaches 2 cache hits", n == 2, n)
+    after = sync_meta.coverage_from_groups(raw, mid_misses)
+    expect("after apply withTmdb 2 noMatch 1 pending 1", after["overall"]["withTmdb"] == 2 and after["overall"]["noMatch"] == 1 and after["overall"]["pending"] == 1 and after["overall"]["pct"] == 50.0, after["overall"])
+    sync_meta.live_publisher = None
+    sync_meta._last_live_push = 0.0
+    os.environ.pop("GITHUB_TOKEN", None)
+    os.environ.pop("GITHUB_REPOSITORY", None)
+    with tempfile.TemporaryDirectory() as td:
+        st = {"new": 0, "openTotal": 1, "queried": 0, "elapsedSec": 30, "partial": True, "phase": "tmdb"}
+        path = sync_meta.write_status(Path(td), raw, mid_misses, st, partial=True, force_live=True)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        expect("mid-run coverage uses cache", doc["withTmdb"] == 2 and doc["noMatch"] == 1 and doc["pending"] == 1 and doc["coveragePct"] == 50.0, doc)
+        expect("mid-run progress 0/1 still shown", doc["progress"]["processed"] == 0 and doc["progress"]["total"] == 1, doc["progress"])
+
     print("ALL PASS")
     return 0
 
