@@ -5,6 +5,8 @@ echo "== title cleaning =="
 python3 test_title.py
 echo "== title rematch / safe pick =="
 python3 test_rematch.py
+echo "== compact customer cache =="
+python3 test_client_export.py
 echo "== status.json =="
 python3 test_status.py
 echo "== sync (mock only) =="

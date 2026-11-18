@@ -48,7 +48,7 @@ from title import clean, extract_tmdb_id, extract_year, looks_adult, names_equiv
 REFRESH_DAYS = 30
 MISS_DAYS = 14
 # Bump when search fallbacks change so non-adult misses can be tried once more.
-SEARCH_REV = 2
+SEARCH_REV = 3
 DEFAULT_REMATCH_MAX = 1500
 TMDB_DEFAULT_BASE = "https://api.themoviedb.org/3"
 LANGUAGE = "de-DE"
@@ -575,9 +575,9 @@ class TmdbClient:
             params = {"query": q, "language": lang, "include_adult": "false", "page": "1"}
             if y:
                 params[year_key] = y
-            return _pick_search(self.get(path, params), q, strict=strict)
+            return _pick_search(self.get(path, params), q, strict=True, year=year)
 
-        # Primary: current language, with year if we have one; existing acceptance rules.
+        # Primary: exact/equivalent title, unique result and matching known year.
         hit = run(queries[0], year, LANGUAGE, False)
         if not hit and year:
             hit = run(queries[0], "", LANGUAGE, True)
@@ -611,24 +611,26 @@ class TmdbClient:
         return normalize_details(typ, data)
 
 
-def _pick_search(data: Any, query: str, strict: bool = False) -> Optional[dict]:
-    if not isinstance(data, dict):
+def _pick_search(data: Any, query: str, strict: bool = True, year: str = "") -> Optional[dict]:
+    """No first-result fallback. A title must match; known years must agree ±1.
+
+    The strict argument is retained for old callers, but never enables guessing.
+    Without a year, multiple distinct exact-name results are ambiguous.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
         return None
-    results = data.get("results")
-    if not isinstance(results, list) or not results:
-        return None
-    want = query.lower().strip()
-    for r in results:
-        if not isinstance(r, dict):
+    hits = {}
+    for r in data["results"]:
+        if not isinstance(r, dict) or not r.get("id"):
             continue
-        names = [r.get("title"), r.get("name"), r.get("original_title"), r.get("original_name")]
-        if any(t and str(t).lower().strip() == want for t in names):
-            return r
-        if any(t and names_equivalent(t, query) for t in names):
-            return r
-    if strict:
-        return None
-    return results[0] if isinstance(results[0], dict) else None
+        names = [r.get(k) for k in ("title", "name", "original_title", "original_name")]
+        if not any(names_equivalent(t, query) for t in names if t):
+            continue
+        ry = str(r.get("release_date") or r.get("first_air_date") or "")[:4]
+        if year and (not ry.isdigit() or abs(int(ry) - int(year)) > 1):
+            continue
+        hits[str(r["id"])] = r
+    return next(iter(hits.values())) if len(hits) == 1 else None
 
 
 def _safe_path(value: Any) -> str:
@@ -1136,6 +1138,16 @@ def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, 
     return path
 
 
+def cached_identity_ok(g: dict, e: dict) -> bool:
+    """Reject old guessed title mappings before reusing their TMDB ID."""
+    if e.get("type") != g.get("type"):
+        return False
+    y, ey = str(g.get("year") or ""), str(e.get("year") or "")
+    if y and (not y.isdigit() or not ey.isdigit() or abs(int(y)-int(ey)) > 1):
+        return False
+    return any(names_equivalent(g.get("query"), e.get(k)) for k in ("title", "originalTitle"))
+
+
 def existing_entry_key(g: dict, entries: dict, prev_by_title: dict) -> Optional[str]:
     typ, query, year = g["type"], g["query"], g["year"]
     tid = g.get("tmdb_id")
@@ -1150,7 +1162,7 @@ def existing_entry_key(g: dict, entries: dict, prev_by_title: dict) -> Optional[
             prev = prev_by_title.get(title_key(ref.get("type") or typ, ref.get("name") or "", ref.get("year") or ""))
             if prev:
                 break
-    if prev and prev in entries:
+    if prev and prev in entries and cached_identity_ok(g, entries[prev]):
         return prev
     return None
 
@@ -1573,22 +1585,9 @@ def sync(data_dir: Path) -> int:
             # Keep any already attached cache hit for the player; never search or add a miss.
             skipped += 1
             continue
-        existing_key = entry_key(typ, tid) if tid else None
-        if not existing_key:
-            # Already resolved in a previous run (by cleaned title, including other providers).
-            prev = prev_by_title.get(miss_key)
-            if not prev:
-                for ref in g["refs"]:
-                    prev = prev_by_title.get(title_key(ref["type"], ref["name"], ref["year"]))
-                    if prev:
-                        break
-            if prev and prev in entries:
-                existing_key = prev
-                if not tid:
-                    try:
-                        tid = int((entries[prev] or {}).get("tmdbId") or 0) or None
-                    except (TypeError, ValueError):
-                        tid = None
+        existing_key = existing_entry_key(g, entries, prev_by_title)
+        if existing_key and not tid:
+            tid = int((entries.get(existing_key) or {}).get("tmdbId") or 0) or None
 
         entry = entries.get(existing_key) if existing_key else None
         miss = misses.get(miss_key)
@@ -1618,7 +1617,7 @@ def sync(data_dir: Path) -> int:
         # If we don't have a tmdb id, search (unless we can reuse a stale entry via title — we don't store title on miss only)
         if not tid:
             # Reuse a previously stored id if the stale entry still exists under a known key in misses? misses have tmdbId maybe
-            if miss and miss.get("tmdbId"):
+            if miss and miss.get("tmdbId") and int(miss.get("searchRev") or 0) >= SEARCH_REV:
                 tid = int(miss["tmdbId"])
             else:
                 if budget_hit():

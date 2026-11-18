@@ -1,0 +1,36 @@
+name: Build customer metadata cache
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['scripts/export_client.py', 'scripts/title.py', '.github/workflows/export-client.yml']
+  workflow_run:
+    workflows: ['Sync TMDB-Metadaten']
+    types: [completed]
+permissions:
+  contents: write
+concurrency:
+  group: customer-metadata-export
+  cancel-in-progress: false
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Export locally without provider or TMDB calls
+        run: python3 scripts/export_client.py --data-dir data
+      - name: Publish complete cache generation
+        run: |
+          git add -A data/client-v1/
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: publish compact customer metadata cache'
+          git pull --rebase origin main
+          git push origin HEAD:main
