@@ -136,7 +136,7 @@ def main() -> int:
         {"type": "movie", "query": "Noch Offen", "year": "2024", "resolved": None,
          "refs": [{"provider": "one", "type": "movie", "id": "4", "name": "Noch Offen", "year": "2024"}]},
     ]
-    entries = {"movie:238": {"tmdbId": 238, "title": "Der Pate"}, "tv:1396": {"tmdbId": 1396, "title": "Breaking Bad"}}
+    entries = {"movie:238": {"tmdbId": 238, "title": "Der Pate", "type": "movie", "year": "1972"}, "tv:1396": {"tmdbId": 1396, "title": "Breaking Bad", "type": "series", "year": "2008"}}
     prev = {
         sync_meta.title_key("movie", "Der Pate", "1972"): "movie:238",
         sync_meta.title_key("series", "Breaking Bad", "2008"): "tv:1396",

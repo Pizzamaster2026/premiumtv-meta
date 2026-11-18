@@ -67,7 +67,7 @@ def main() -> int:
     hit2 = sync_meta._pick_search(data, "The Godfather")
     expect("original_title matches", hit2 and hit2["id"] == 238, hit2)
     loose = sync_meta._pick_search(data, "Unknown Film", strict=False)
-    expect("legacy first result when not strict", loose and loose["id"] == 1, loose)
+    expect("first-result guess rejected even for old callers", loose is None, loose)
     strict = sync_meta._pick_search(data, "Unknown Film", strict=True)
     expect("strict fallback rejects mismatch", strict is None, strict)
     apos = sync_meta._pick_search({"results": [{"id": 424, "title": "Schindler's List"}]}, "Schindlers List", strict=True)
