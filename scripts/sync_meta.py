@@ -955,6 +955,21 @@ def coverage_from_groups(groups: list[dict], misses: dict) -> dict:
     return {"overall": overall, "providers": providers}
 
 
+def _adult_status(data_dir: Optional[Path]) -> dict:
+    """Cover progress for the Manager. Counts only; never secrets or titles."""
+    empty = {"titles": 0, "withCover": 0, "noMatch": 0, "pending": 0, "coveragePct": 0.0, "items": 0}
+    if data_dir is None:
+        return empty
+    try:
+        import adult_tpdb
+        doc = adult_tpdb.coverage(data_dir)
+        if isinstance(doc, dict):
+            return doc
+    except Exception:
+        pass
+    return empty
+
+
 def build_status(
     *,
     groups: list[dict],
@@ -963,6 +978,7 @@ def build_status(
     updated_at: str,
     phase: str,
     running: bool,
+    data_dir: Optional[Path] = None,
 ) -> dict:
     cov = coverage_from_groups(groups, misses)
     overall = cov["overall"]
@@ -1006,6 +1022,7 @@ def build_status(
     if open_total is not None:
         doc["openTotal"] = int(open_total)
         doc["queried"] = int(queried or 0)
+    doc["adult"] = _adult_status(data_dir)
     return doc
 
 
@@ -1130,6 +1147,7 @@ def write_status(data_dir: Path, groups: list[dict], misses: dict, stats: dict, 
         updated_at=utc_now_iso(),
         phase=phase,
         running=partial,
+        data_dir=data_dir,
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "status.json"

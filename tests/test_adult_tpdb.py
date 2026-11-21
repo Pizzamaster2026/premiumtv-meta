@@ -161,6 +161,19 @@ class AdultTpdbTest(unittest.TestCase):
             # miss retried after 30 days
             api3 = FakeApi({}); c3, _ = client(api3)
             self.assertEqual(A.run_step(d, client=c3, now=NOW + timedelta(days=31))['pending'], 1)
+            st_doc = json.loads((d / 'status.json').read_text())
+            # unique queries: fortunate buns (match), unknown thing (miss), junk (noMatch); 3 titles, 1 cover
+            ad = st_doc['adult']
+            self.assertEqual((ad['withCover'], ad['noMatch'], ad['pending'], ad['titles'], ad['items']), (1, 2, 0, 3, 4))
+            self.assertNotIn('tushy', json.dumps(ad))
+
+    def test_coverage_missing_files_are_zero(self):
+        with tempfile.TemporaryDirectory() as tdir:
+            d = Path(tdir)
+            cov = A.coverage(d)
+            self.assertEqual((cov['titles'], cov['withCover'], cov['pending'], cov['noMatch'], cov['items']), (0, 0, 0, 0, 0))
+            self.assertEqual(cov['coveragePct'], 0.0)
+            self.assertIn('updatedAt', cov)
 
     def test_cap_stops_and_keeps_done_work(self):
         with tempfile.TemporaryDirectory() as t:

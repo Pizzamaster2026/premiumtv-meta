@@ -508,12 +508,75 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def coverage(data_dir: Path) -> dict:
+    """Unique-query cover progress for the Manager. Counts only, never titles or URLs."""
+    empty = {"titles": 0, "withCover": 0, "noMatch": 0, "pending": 0, "coveragePct": 0.0, "items": 0}
+    titles_doc = load_json(Path(data_dir) / TITLES_FILE, {})
+    items = titles_doc.get("items") if isinstance(titles_doc, dict) else None
+    if not isinstance(items, dict) or not items:
+        out = dict(empty)
+        out["updatedAt"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return out
+    cache_titles = load_cache(data_dir)["titles"]
+    unique: dict[str, dict] = {}
+    for name in items.values():
+        aq = adult_query(name)
+        unique[aq["key"]] = aq
+    with_cover = no_match = pending = 0
+    for aq in unique.values():
+        if junk_query(aq):
+            no_match += 1
+            continue
+        rec = cache_titles.get(aq["key"])
+        st = rec.get("status") if isinstance(rec, dict) else None
+        if st == "match":
+            with_cover += 1
+        elif st == "miss":
+            no_match += 1
+        else:
+            pending += 1
+    total = with_cover + no_match + pending
+    return {
+        "titles": total,
+        "withCover": with_cover,
+        "noMatch": no_match,
+        "pending": pending,
+        "coveragePct": round(100.0 * with_cover / total, 1) if total else 0.0,
+        "items": len(items),
+        "updatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def update_status(data_dir: Path, publish: bool = True) -> Path:
+    """Write adult counts into data/status.json (keep existing TMDB fields). Never writes secrets."""
+    path = Path(data_dir) / "status.json"
+    doc: dict[str, Any] = {"version": 1}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                doc = loaded
+        except Exception:
+            pass
+    doc["adult"] = coverage(data_dir)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, sort_keys=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    if publish:
+        try:
+            import sync_meta
+            sync_meta.maybe_publish_live(doc, force=True)
+        except Exception:
+            log("Live-Status für Erwachsenenfilme übersprungen.")
+    return path
+
+
 def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbClient] = None,
              now: Optional[datetime] = None) -> dict:
     """Never raises. Returns counts."""
     stats = {"pending": 0, "asked": 0, "matched": 0, "missed": 0, "failed": 0, "requests": 0, "stopped": ""}
+    data_dir = Path(data_dir)
     try:
-        data_dir = Path(data_dir)
         now = now or datetime.now(timezone.utc)
         now_iso = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         titles_doc = load_json(data_dir / TITLES_FILE, {})
@@ -569,6 +632,11 @@ def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbC
     except Exception as e:  # never fail the workflow
         stats["stopped"] = f"error {type(e).__name__}"
         log(f"Unerwarteter Fehler ({type(e).__name__}) – Schritt übersprungen, Sync bleibt unberührt.")
+    finally:
+        try:
+            update_status(data_dir)
+        except Exception:
+            log("Stand für die Manager-Leiste konnte nicht geschrieben werden.")
     return stats
 
 

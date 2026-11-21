@@ -183,6 +183,51 @@ def main() -> int:
         doc = json.loads(path.read_text(encoding="utf-8"))
         expect("status titles ignore adult", doc["titles"] == 4 and doc["adultSkipped"] == 2 and doc["coveragePct"] == 50.0, doc)
         expect("player-safe no schema break", "providers" in doc and "progress" in doc and "withTmdb" in doc, list(doc))
+        ad = doc.get("adult") or {}
+        expect("adult counts present when no titles file", ad.get("titles") == 0 and ad.get("withCover") == 0 and ad.get("pending") == 0 and ad.get("noMatch") == 0, ad)
+
+    # Adult cover progress from adult-titles.json + cache, unique queries, junk = noMatch.
+    import adult_tpdb
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        items = {
+            "premiumtv:movie:1": "(XXX-) Tushy - Fortunate Buns",
+            "premiumtv:movie:3": "(XXX-) Tushy - Fortunate Buns",  # same query
+            "premiumtv:movie:2": "(XXX-) Unknown Thing",
+            "premiumtv:movie:4": "(XXX-) PARTY_SEX 58e91c6191fa.720",  # junk
+            "premiumtv:movie:5": "(XXX-) Still Open Title",
+        }
+        (d / "adult-titles.json").write_text(json.dumps({"version": 1, "generatedAt": "T", "items": items}), encoding="utf-8")
+        (d / "adult-tpdb.json").write_text(json.dumps({
+            "version": 1, "updatedAt": "T",
+            "titles": {
+                "tushy fortunate buns": {"status": "match", "checkedAt": "T"},
+                "unknown thing": {"status": "miss", "checkedAt": "T"},
+            },
+            "performers": {},
+        }), encoding="utf-8")
+        cov = adult_tpdb.coverage(d)
+        expect("adult unique titles 4", cov["titles"] == 4 and cov["items"] == 5, cov)
+        expect("adult 1 match 2 noMatch (incl junk) 1 pending", cov["withCover"] == 1 and cov["noMatch"] == 2 and cov["pending"] == 1 and cov["coveragePct"] == 25.0, cov)
+        path = sync_meta.write_status(d, sample_groups(), sample_misses(), {"new": 0, "partial": False}, partial=False)
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        expect("write_status keeps TMDB and attaches adult", doc["titles"] == 4 and doc["adult"]["withCover"] == 1 and doc["adult"]["pending"] == 1, doc["adult"])
+        # update_status must not wipe TMDB fields
+        doc["withTmdb"] = 2
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        (d / "adult-tpdb.json").write_text(json.dumps({
+            "version": 1, "updatedAt": "T",
+            "titles": {
+                "tushy fortunate buns": {"status": "match", "checkedAt": "T"},
+                "unknown thing": {"status": "miss", "checkedAt": "T"},
+                "still open title": {"status": "match", "checkedAt": "T"},
+            },
+            "performers": {},
+        }), encoding="utf-8")
+        adult_tpdb.update_status(d, publish=False)
+        doc2 = json.loads(path.read_text(encoding="utf-8"))
+        expect("update_status preserves TMDB", doc2["titles"] == 4 and doc2["withTmdb"] == 2, doc2)
+        expect("update_status new cover count", doc2["adult"]["withCover"] == 2 and doc2["adult"]["pending"] == 0 and doc2["adult"]["noMatch"] == 2, doc2["adult"])
 
     print("ALL PASS")
     return 0

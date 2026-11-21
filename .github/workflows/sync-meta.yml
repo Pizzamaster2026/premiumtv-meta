@@ -122,18 +122,22 @@ jobs:
           TPDB_MIN_INTERVAL_SEC: "1.0"
           TPDB_MAX_REQUESTS: "1500"
           TPDB_BUDGET_MIN: "28"
+          # Update data/status.json (and the live 'status' branch) for the Manager bar.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_STATUS_BRANCH: status
+          SYNC_STATUS_PUSH_SEC: "30"
         run: python3 scripts/adult_tpdb.py --data-dir data
 
       - name: Änderungen übernehmen
         continue-on-error: true
         run: |
-          if [ ! -e data/adult-tpdb.json ]; then
-            echo "Kein TPDB-Cache geschrieben."
-            exit 0
-          fi
-          git add -- data/adult-tpdb.json
+          for f in data/adult-tpdb.json data/status.json; do
+            if [ -e "$f" ]; then
+              git add -- "$f"
+            fi
+          done
           if git diff --cached --quiet; then
-            echo "Keine Änderungen am TPDB-Cache."
+            echo "Keine Änderungen am TPDB-Cache oder Status."
             exit 0
           fi
           git config user.name "github-actions[bot]"

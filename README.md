@@ -122,6 +122,9 @@ Für Titel, die der Abgleich als Erwachsenenfilm erkennt (gleiche Erkennung wie 
 | `data/adult-titles.json` | `sync_meta.py` (Job `sync`) | `{"version":1,"generatedAt":ISO,"items":{"<provider>:<type>:<id>":"<Originalname>"}}` – nur Erwachsenen-Einträge |
 | `data/adult-tpdb.json` | `adult_tpdb.py` (Job `adult-covers`) | interner Cache, siehe unten |
 | `data/client-v1/adult-<bucket>-<sha16>.json` | `export_client.py` | Kundendaten für die App (Map `adult`) |
+| `data/status.json` (Feld `adult`) | `sync_meta.py` und `adult_tpdb.py` | nur Zahlen für die Manager-Leiste: `titles`, `withCover`, `noMatch`, `pending`, `coveragePct`, `items` – keine Titel, keine Cover-URLs |
+
+Die PremiumTV Manager-App liest die Abdeckung aus `data/status.json` (wie beim TMDB-Abgleich). Das Feld `adult` zählt eindeutige Suchbegriffe (nicht jede Stream-ID einzeln). Bis der erste nächtliche Lauf `adult-titles.json` geschrieben hat, stehen die Zahlen auf 0.
 
 Interner Cache `data/adult-tpdb.json` (die App liest ihn **nicht**):
 
