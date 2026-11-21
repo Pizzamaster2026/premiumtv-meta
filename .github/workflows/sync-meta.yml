@@ -75,7 +75,7 @@ jobs:
           # abort the whole add; `|| true` hid that, and `git add -u` does not
           # pick up a newly written, still-untracked data/status.json.
           git add -u data/
-          for f in data/index.json data/status.json data/meta.json data/meta-*.json; do
+          for f in data/index.json data/status.json data/adult-titles.json data/meta.json data/meta-*.json; do
             if [ -e "$f" ]; then
               git add -- "$f"
             fi
@@ -91,3 +91,53 @@ jobs:
           # it touches only data/titles_*.json.gz, so a rebase is conflict-free.
           git pull --rebase origin "${GITHUB_REF_NAME:-main}"
           git push
+
+  # Adult covers from ThePornDB (only for titles the sync marks as adult).
+  # Separate job so it can never eat into the TMDB time budget. It never fails
+  # the run (continue-on-error + the script always exits 0), so the customer
+  # export (workflow_run on success) still runs and picks up the new covers.
+  adult-covers:
+    needs: sync
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - name: Repository auschecken (aktueller Stand nach dem Abgleich)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Erwachsenen-Cover (TPDB) abgleichen
+        continue-on-error: true
+        timeout-minutes: 32
+        env:
+          TPDB_API_KEY: ${{ secrets.TPDB_API_KEY }}
+          # ~1 request per second, cap per run; the rest waits for the next night.
+          TPDB_MIN_INTERVAL_SEC: "1.0"
+          TPDB_MAX_REQUESTS: "1500"
+          TPDB_BUDGET_MIN: "28"
+        run: python3 scripts/adult_tpdb.py --data-dir data
+
+      - name: Änderungen übernehmen
+        continue-on-error: true
+        run: |
+          if [ ! -e data/adult-tpdb.json ]; then
+            echo "Kein TPDB-Cache geschrieben."
+            exit 0
+          fi
+          git add -- data/adult-tpdb.json
+          if git diff --cached --quiet; then
+            echo "Keine Änderungen am TPDB-Cache."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: Erwachsenen-Cover (TPDB) aktualisieren"
+          git pull --rebase origin main
+          git push origin HEAD:main

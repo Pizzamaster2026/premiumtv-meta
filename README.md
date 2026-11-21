@@ -103,6 +103,67 @@ Format (Zeiten in UTC-Sekunden):
 
 `cat` (optional) = EPG-Sportkategorie. `kind`: `bl`, `bl2`, `cl`, `dfb`, `pl`, `fb` (anderer Fußball), `f1`, `moto`, `nfl`, `nba`, `ih` (Eishockey), `tennis`, `box`, `hb`, `darts`, `other`.
 
+## Erwachsenen-Cover (ThePornDB)
+
+Für Titel, die der Abgleich als Erwachsenenfilm erkennt (gleiche Erkennung wie beim TMDB-Ausschluss: Katalog-Präfix `(XXX-)`, `title.looks_adult` / `sync_meta.is_adult_group`), sucht ein eigener Job **nach** dem TMDB-Abgleich passende Cover bei [ThePornDB](https://theporndb.net).
+
+- Workflow `sync-meta.yml`, Job `adult-covers` (läuft nach dem Job `sync`, auch wenn der fehlschlägt; nicht nach Abbruch).
+- Schlüssel: Repository-Secret `TPDB_API_KEY` (Bearer). Er steht nie in Dateien oder im Log.
+- Höchstens ~1 Anfrage pro Sekunde, höchstens 1500 Anfragen und 28 Minuten pro Nacht (`TPDB_MIN_INTERVAL_SEC`, `TPDB_MAX_REQUESTS`, `TPDB_BUDGET_MIN`). Der Rest kommt in den nächsten Nächten dran.
+- Nur sichere Treffer: Titelähnlichkeit ≥ 0,9, bei „Seite - Titel“ muss die Seite (oder die genannten Darsteller) passen, bei „seite.JJ.MM.TT.name“ das genaue Datum; Jahr ±1; zwei gleich gute verschiedene Treffer = kein Treffer. Namen, die nur aus IDs/Hashes bestehen, werden gar nicht gesucht.
+- Darstellerbild ohne Bild in der Szene: `/performers?q=` und nur, wenn genau ein Darsteller exakt so heißt.
+- Nie tödlich: Fehler (auch 401/429/5xx) werden geloggt (nur Zahlen, keine Titel), der Job endet immer erfolgreich, der Kunden-Export läuft weiter.
+- Treffer werden nach 180 Tagen, Fehlversuche nach 30 Tagen, Darsteller-Abfragen nach 60 Tagen neu gefragt. Netzwerkfehler werden nicht gespeichert (nächste Nacht erneut).
+
+### Dateien
+
+| Datei | Wer schreibt | Inhalt |
+| --- | --- | --- |
+| `data/adult-titles.json` | `sync_meta.py` (Job `sync`) | `{"version":1,"generatedAt":ISO,"items":{"<provider>:<type>:<id>":"<Originalname>"}}` – nur Erwachsenen-Einträge |
+| `data/adult-tpdb.json` | `adult_tpdb.py` (Job `adult-covers`) | interner Cache, siehe unten |
+| `data/client-v1/adult-<bucket>-<sha16>.json` | `export_client.py` | Kundendaten für die App (Map `adult`) |
+
+Interner Cache `data/adult-tpdb.json` (die App liest ihn **nicht**):
+
+```json
+{"version":1,"updatedAt":"2026-11-22T02:40:00Z",
+ "titles":{"<suchschluessel>":{"status":"match","checkedAt":"…","source":"scene|movie","tpdbId":"…","title":"…","site":"…",
+                               "year":"2024","poster":"https://…","background":"https://…|''","overview":"…",
+                               "performers":[{"name":"…","image":"https://…|''"}],"score":0.97},
+           "<suchschluessel>":{"status":"miss","checkedAt":"…"}},
+ "performers":{"<name normalisiert>":{"image":"https://…|''","checkedAt":"…"}}}
+```
+
+### Schema für die Player-App (ab 0.2.18)
+
+`data/client-v1/manifest.json` bekommt (nur wenn es mindestens einen Treffer gibt) die Map `maps.adult` und immer `counts.adult`:
+
+```json
+"maps":{"adult":{"count":64,"chunks":{"<bucket>":{"file":"adult-<bucket>-<sha16>.json","bytes":123,"sha256":"…"}}}},
+"counts":{"adult":1234}
+```
+
+- Bucket = `bucket(key, 64)` – derselbe Hash wie bei `id`/`title`/`meta` (djb2-XOR: `h=5381; h=((h*33)^charCode) & 0xffffffff`, dann `h % 64`).
+- `key` = `<provider>:<type>:<streamId>`, z. B. `premiumtv:movie:613276` (wie die Map `id`).
+- Chunk-Datei: `{"version":1,"items":{"<key>":ENTRY}}`
+
+ENTRY (alle Felder immer vorhanden):
+
+| Feld | Typ | Bedeutung |
+| --- | --- | --- |
+| `adult` | `true` | immer `true`: nur hinter der PIN zeigen |
+| `q` | string | normalisierter Suchbegriff (Name ohne `(XXX-)`, bereinigt wie `title.clean`, dann klein, ß→ss, ohne Akzente, Nicht-Alphanumerisch→Leerzeichen). Die App vergleicht ihn mit dem aktuellen Namen der Zeile, bevor sie den Eintrag nutzt (Stream-IDs können neu vergeben werden). |
+| `src` | `"scene"` \| `"movie"` | Treffer aus `/scenes` oder `/movies` |
+| `title` | string | Titel bei TPDB (≤ 200) |
+| `site` | string | Studio/Seite (≤ 80, kann leer sein) |
+| `year` | string | `JJJJ` oder `""` |
+| `poster` | string | https-URL des Covers (immer gesetzt) |
+| `backdrop` | string | https-URL Hintergrundbild oder `""` |
+| `overview` | string | Kurzbeschreibung (≤ 600, englisch, kann leer sein) |
+| `performers` | array | bis 6 × `{"name": string, "photo": https-URL oder ""}` |
+
+Regeln für die App: Die Map `adult` nur lesen, wenn Erwachsenen-Inhalte per PIN freigeschaltet sind; nie für Bildschirmschoner, Empfehlungen, Startseite, Suche ohne PIN oder Vorschauen verwenden. Fehlt `maps.adult`, gibt es (noch) keine Cover – normal weiterarbeiten.
+
 ## Hinweise
 
 - Das Repository ist öffentlich, damit die App die Dateien ohne Token lesen kann. Lege hier **keine** Passwörter oder API-Schlüssel in Dateien ab.

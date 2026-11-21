@@ -1385,6 +1385,16 @@ def sport_step(data_dir: Path, configured: list[dict]) -> str:
         return "failed"
 
 
+def adult_titles_step(data_dir: Path, groups: list[dict], generated_at: str) -> None:
+    """data/adult-titles.json for the separate TPDB cover job. Never raises, never fails the sync."""
+    try:
+        import adult_tpdb
+        n = adult_tpdb.write_titles_file(data_dir, groups, is_adult_group, generated_at)
+        log(f"Erwachsenen-Titelliste für TPDB: {n} Einträge.")
+    except Exception as e:  # noqa: BLE001 - optional step
+        log(f"Erwachsenen-Titelliste übersprungen ({type(e).__name__}).")
+
+
 def sync(data_dir: Path) -> int:
     msg = missing_secrets_message(data_dir)
     if msg:
@@ -1468,6 +1478,7 @@ def sync(data_dir: Path) -> int:
         die("Keine Listen empfangen. Abbruch, vorhandene Cache-Dateien bleiben unverändert.", 1)
 
     groups = collect_titles(catalogues)
+    adult_titles_step(data_dir, groups, generated_at)
 
     entries, misses, prev_by_title = load_existing(data_dir)
     fetched = skipped = refreshed = new_hits = new_misses = 0

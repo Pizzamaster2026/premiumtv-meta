@@ -15,4 +15,6 @@ echo "== git add status.json =="
 bash ./test_commit_add.sh
 echo "== sport.json (fixtures only) =="
 python3 test_sport.py
+echo "== adult covers TPDB (mocked API) =="
+python3 test_adult_tpdb.py
 echo "ALL OK"

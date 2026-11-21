@@ -44,6 +44,35 @@ def compact(e):
                        'photo': image_path(c.get('profilePath'))}
                       for c in (e.get('cast') or [])[:8] if isinstance(c, dict)])
 
+def https_url(s):
+    return s if isinstance(s, str) and re.fullmatch(r'https://[A-Za-z0-9.-]+/[^\s"\'<>]{1,480}', s) else ''
+
+def adult_items(data_dir: Path):
+    """Adult covers (TPDB) by provider ID. Separate map 'adult': only behind the PIN, never in
+    screensaver/recommendations. Missing/broken input files simply give no adult map."""
+    try:
+        from adult_tpdb import adult_query
+        titles = json.loads((data_dir/'adult-titles.json').read_text()).get('items') or {}
+        cache = json.loads((data_dir/'adult-tpdb.json').read_text()).get('titles') or {}
+    except (OSError, ValueError, AttributeError, ImportError):
+        return {}
+    out = {}
+    for key, name in titles.items():
+        if not re.fullmatch(r'(premiumtv|one):(movie|series):[0-9]+', str(key)):
+            continue
+        aq = adult_query(name)
+        r = cache.get(aq['key'])
+        if not isinstance(r, dict) or r.get('status') != 'match' or not https_url(r.get('poster')):
+            continue
+        out[key] = {'adult': True, 'q': aq['key'], 'src': 'scene' if r.get('source') == 'scene' else 'movie',
+                    'title': str(r.get('title') or '')[:200], 'site': str(r.get('site') or '')[:80],
+                    'year': str(r.get('year') or '')[:4] if str(r.get('year') or '')[:4].isdigit() else '',
+                    'poster': https_url(r.get('poster')), 'backdrop': https_url(r.get('background')),
+                    'overview': str(r.get('overview') or '')[:600],
+                    'performers': [{'name': str(p.get('name') or '')[:80], 'photo': https_url(p.get('image'))}
+                                   for p in (r.get('performers') or [])[:6] if isinstance(p, dict) and p.get('name')]}
+    return out
+
 def encode(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
 
@@ -81,10 +110,14 @@ def export(data_dir: Path):
                 titles.setdefault(key, {})[v] = e['year']
     # No bare-ID trust: clients must compare the current line title/year/explicit
     # TMDB ID before using any entry reached through the provider-ID map.
+    adult = adult_items(data_dir)
     maps = {'id': (ids, 256), 'title': (titles, 256), 'meta': (metas, 1024)}
+    if adult:
+        maps['adult'] = (adult, 64)
     out = data_dir/'client-v1'; out.mkdir(exist_ok=True)
     manifest = {'version':1, 'generatedAt':index.get('generatedAt'), 'maps':{},
-                'counts': {'ids':len(ids), 'titles':len(titles), 'entries':len(metas), 'rejectedAliases':rejected}}
+                'counts': {'ids':len(ids), 'titles':len(titles), 'entries':len(metas), 'rejectedAliases':rejected,
+                           'adult':len(adult)}}
     keep = set()
     for kind, (mapping, count) in maps.items():
         groups = {}
@@ -111,7 +144,7 @@ def export(data_dir: Path):
     now = time.time()
     tracked = {}
     for p in out.glob('*.json'):
-        if not re.fullmatch(r'(id|title|meta)-[0-9]+-[a-f0-9]{16}\.json', p.name):
+        if not re.fullmatch(r'(id|title|meta|adult)-[0-9]+-[a-f0-9]{16}\.json', p.name):
             continue
         last_used = now if p.name in keep else retention.get(p.name, now)
         if p.name not in keep and last_used < now-35*86400:
