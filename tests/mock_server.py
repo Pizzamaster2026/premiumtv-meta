@@ -45,6 +45,14 @@ MOVIES = {
         "credits": {"cast": [
             {"id": 3084, "name": "Marlon Brando", "character": "Don Vito Corleone", "profile_path": "/brando.jpg", "order": 0},
             {"id": 1158, "name": "Al Pacino", "character": "Michael Corleone", "profile_path": "/pacino.jpg", "order": 1},
+        ] + [
+            {"id": 9000 + i, "name": "Extra Actor %02d" % i, "character": "Extra", "order": 10 + i}
+            for i in range(1, 16)
+        ] + [
+            {"id": 9100, "name": "Cameo Star", "character": "Cameo", "order": 40},
+        ], "crew": [
+            {"id": 1776, "name": "Francis Ford Coppola", "job": "Director", "department": "Directing"},
+            {"id": 1, "name": "Not A Director", "job": "Producer", "department": "Production"},
         ]},
     },
     603: {
@@ -55,6 +63,8 @@ MOVIES = {
         "genres": [{"id": 28, "name": "Action"}, {"id": 878, "name": "Science Fiction"}],
         "credits": {"cast": [
             {"id": 6384, "name": "Keanu Reeves", "character": "Neo", "profile_path": "/keanu.jpg", "order": 0},
+        ], "crew": [
+            {"id": 9339, "name": "Lana Wachowski", "job": "Director"},
         ]},
     },
     27205: {
@@ -77,6 +87,10 @@ TV = {
         "genres": [{"id": 18, "name": "Drama"}, {"id": 80, "name": "Krimi"}],
         "credits": {"cast": [
             {"id": 17419, "name": "Bryan Cranston", "character": "Walter White", "profile_path": "/bryan.jpg", "order": 0},
+        ]},
+        "aggregate_credits": {"cast": [
+            {"id": 17419, "name": "Bryan Cranston", "roles": [{"character": "Walter White"}], "order": 0, "total_episode_count": 62, "profile_path": "/bryan.jpg"},
+            {"id": 14319, "name": "Bob Odenkirk", "roles": [{"character": "Saul Goodman"}], "order": 8, "total_episode_count": 37, "profile_path": "/saul.jpg"},
         ]},
     },
     2316: {

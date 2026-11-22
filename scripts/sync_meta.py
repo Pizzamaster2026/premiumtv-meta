@@ -52,7 +52,9 @@ SEARCH_REV = 3
 DEFAULT_REMATCH_MAX = 1500
 TMDB_DEFAULT_BASE = "https://api.themoviedb.org/3"
 LANGUAGE = "de-DE"
-CAST_MAX = 12
+CAST_MAX = 400
+DIRECTOR_MAX = 4
+CREDITS_REV = 1
 OVERVIEW_MAX = 2000
 SHARD_BYTES = 8 * 1024 * 1024
 RATE_MAX = 40
@@ -605,7 +607,8 @@ class TmdbClient:
 
     def details(self, typ: str, tmdb_id: int) -> Optional[dict]:
         path = f"/tv/{tmdb_id}" if typ == "series" else f"/movie/{tmdb_id}"
-        data = self.get(path, {"language": LANGUAGE, "append_to_response": "credits"})
+        append = "credits,aggregate_credits" if typ == "series" else "credits"
+        data = self.get(path, {"language": LANGUAGE, "append_to_response": append})
         if not isinstance(data, dict) or not data.get("id"):
             return None
         return normalize_details(typ, data)
@@ -666,18 +669,32 @@ def normalize_details(typ: str, data: dict) -> dict:
     title = str(data.get("title") or data.get("name") or "").strip()
     original = str(data.get("original_title") or data.get("original_name") or "").strip()
     credits = data.get("credits") if isinstance(data.get("credits"), dict) else {}
-    cast_in = credits.get("cast") if isinstance(credits.get("cast"), list) else []
-    # honour official 'order' when present
+    # Series: aggregate_credits includes guest stars from every season (same details request).
+    agg = data.get("aggregate_credits") if isinstance(data.get("aggregate_credits"), dict) else {}
+    if typ == "series" and isinstance(agg.get("cast"), list) and agg.get("cast"):
+        cast_in = agg["cast"]
+    else:
+        cast_in = credits.get("cast") if isinstance(credits.get("cast"), list) else []
     def _order(c: dict) -> int:
         try:
             return int(c.get("order") if c.get("order") is not None else 999)
         except (TypeError, ValueError):
             return 999
+    def _character(c: dict) -> str:
+        ch = str(c.get("character") or "").strip()
+        if ch:
+            return ch
+        roles = c.get("roles") if isinstance(c.get("roles"), list) else []
+        if roles and isinstance(roles[0], dict):
+            return str(roles[0].get("character") or "").strip()
+        return ""
 
     rows = [c for c in cast_in if isinstance(c, dict)]
     rows.sort(key=_order)
-    cast = []
-    for c in rows[:CAST_MAX]:
+    cast, seen_cast = [], set()
+    for c in rows:
+        if len(cast) >= CAST_MAX:
+            break
         try:
             pid = int(c.get("id") or 0)
         except (TypeError, ValueError):
@@ -685,12 +702,38 @@ def normalize_details(typ: str, data: dict) -> dict:
         name = str(c.get("name") or "").strip()
         if not name:
             continue
-        cast.append({
-            "id": pid or None,
-            "name": name,
-            "character": str(c.get("character") or "").strip(),
-            "profilePath": _safe_path(c.get("profile_path")),
-        })
+        mark = pid or name.lower()
+        if mark in seen_cast:
+            continue
+        seen_cast.add(mark)
+        # First 12 keep character + photo for the detail page; the rest stay slim for the people index.
+        item = {"id": pid or None, "name": name}
+        if len(cast) < 12:
+            item["character"] = _character(c)
+            item["profilePath"] = _safe_path(c.get("profile_path"))
+        elif _safe_path(c.get("profile_path")):
+            item["profilePath"] = _safe_path(c.get("profile_path"))
+        cast.append(item)
+    # Directors come from the same append_to_response=credits payload – no extra TMDB request.
+    crew_in = credits.get("crew") if isinstance(credits.get("crew"), list) else []
+    directors, seen_dir = [], set()
+    for c in crew_in:
+        if not isinstance(c, dict) or str(c.get("job") or "").strip() != "Director":
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            pid = int(c.get("id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        mark = pid or name.lower()
+        if mark in seen_dir:
+            continue
+        seen_dir.add(mark)
+        directors.append({"id": pid or None, "name": name})
+        if len(directors) >= DIRECTOR_MAX:
+            break
     try:
         va = round(float(data.get("vote_average") or 0) + 1e-9, 1)
     except (TypeError, ValueError):
@@ -717,6 +760,8 @@ def normalize_details(typ: str, data: dict) -> dict:
         "posterPath": _safe_path(data.get("poster_path")),
         "backdropPath": _safe_path(data.get("backdrop_path")),
         "cast": cast,
+        "directors": directors,
+        "creditsRev": CREDITS_REV,
     }
 
 
@@ -740,6 +785,18 @@ def is_fresh(entry: dict, now: datetime, days: int) -> bool:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return (now - ts).total_seconds() < days * 86400
+
+
+def credits_complete(entry: dict) -> bool:
+    """False until the entry was stored with the full-cast / aggregate_credits revision."""
+    try:
+        return int((entry or {}).get("creditsRev") or 0) >= CREDITS_REV
+    except (TypeError, ValueError):
+        return False
+
+
+def entry_current(entry: Optional[dict], now: datetime) -> bool:
+    return bool(entry) and is_fresh(entry, now, REFRESH_DAYS) and credits_complete(entry)
 
 
 def env_number(name: str, default: float, kind=float):
@@ -1251,7 +1308,7 @@ def needs_tmdb_lookup(g: dict, entries: dict, misses: dict, prev_by_title: dict,
     existing_key = existing_entry_key(g, entries, prev_by_title)
     entry = entries.get(existing_key) if existing_key else None
     miss = misses.get(title_key(typ, query, year))
-    if entry and is_fresh(entry, now, REFRESH_DAYS):
+    if entry_current(entry, now):
         return False
     if not tid and miss and not miss_should_retry(miss, g, now):
         return False
@@ -1621,7 +1678,7 @@ def sync(data_dir: Path) -> int:
         entry = entries.get(existing_key) if existing_key else None
         miss = misses.get(miss_key)
 
-        if entry and is_fresh(entry, now, REFRESH_DAYS):
+        if entry_current(entry, now):
             skipped += 1
             g["resolved"] = existing_key
             continue
@@ -1671,7 +1728,7 @@ def sync(data_dir: Path) -> int:
 
         ekey = entry_key(typ, tid)
         stale = entries.get(ekey)
-        if stale and is_fresh(stale, now, REFRESH_DAYS):
+        if entry_current(stale, now):
             skipped += 1
             g["resolved"] = ekey
             misses.pop(miss_key, None)

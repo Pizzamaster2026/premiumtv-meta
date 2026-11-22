@@ -95,6 +95,13 @@ def test_full_sync_and_incremental(base: str):
         expect("vote", g["voteAverage"] == 8.7)
         expect("poster", g["posterPath"] == "/pate.jpg")
         expect("cast brando", g["cast"][0]["name"] == "Marlon Brando" and g["cast"][0]["id"] == 3084)
+        expect("director from same credits payload", g["directors"][0]["name"] == "Francis Ford Coppola" and g["directors"][0]["id"] == 1776)
+        expect("producers are not stored as directors", len(g["directors"]) == 1)
+        expect("creditsRev stored", g.get("creditsRev") == 1)
+        expect("full movie credits beyond top 12",
+               any(c.get("name") == "Cameo Star" for c in g["cast"]) and len(g["cast"]) >= 18)
+        expect("series uses aggregate guest credits",
+               any(c.get("name") == "Bob Odenkirk" for c in meta["entries"]["tv:1396"]["cast"]))
         expect("both providers share film",
                idx["byId"]["premiumtv:movie:1001"] == "movie:238"
                and idx["byId"]["one:movie:501"] == "movie:238")

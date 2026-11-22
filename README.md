@@ -167,6 +167,24 @@ ENTRY (alle Felder immer vorhanden):
 
 Regeln für die App: Die Map `adult` nur lesen, wenn Erwachsenen-Inhalte per PIN freigeschaltet sind; nie für Bildschirmschoner, Empfehlungen, Startseite, Suche ohne PIN oder Vorschauen verwenden. Fehlt `maps.adult`, gibt es (noch) keine Cover – normal weiterarbeiten.
 
+### Schauspieler-Index (Map `people`)
+
+Die nächtliche Sync speichert die **volle Besetzung** jedes zugeordneten Titels (`CAST_MAX` 400). Bei Serien kommt `append_to_response=credits,aggregate_credits` zum Einsatz, damit auch Gastrollen aus allen Staffeln im Index landen – nicht nur die Hauptdarsteller der Serien-Credits. Einträge ohne `creditsRev` 1 werden auch dann nachgeladen, wenn sie sonst noch frisch wären (budgetiert, über mehrere Nächte).
+
+`export_client.py` baut aus den **Roh-Einträgen** (nicht aus der auf 8 Namen gekürzten Meta-Map) die Map `people`:
+
+```json
+"maps":{"people":{"count":577,"scheme":"prefix3","chunks":{"ada":{"file":"people-ada-<sha16>.json","bytes":123,"sha256":"…"}}}},
+"counts":{"people":123456}
+```
+
+- Bucket = die ersten drei Buchstaben des normalisierten Namens (`adam sandler` → `ada`). Ein 2-Buchstaben-Suchbegriff lädt alle Buckets, deren Schlüssel so beginnt. Wird ein Bucket größer als 2 MiB, wird er auf 4 Buchstaben gesplittet.
+- Volle Einträge liegen im Bucket des ganzen Namens: `{"n":"Adam Sandler","i":66580,"p":"/….jpg","m":[123,456],"s":[789],"d":[],"ds":[]}`. `m`/`s` sind TMDB-IDs (Filme / Serien), `d`/`ds` Regie.
+- Im Bucket des Nachnamens liegt ein Stub `{"r":"adam sandler","n":"Adam Sandler","i":…,"p":…}`, damit die Suche nach „Sandler“ denselben Eintrag findet.
+- Die App löst die TMDB-IDs über die Map `meta` und den lokalen Katalog (Titel+Jahr) auf und zeigt alle Treffer der Bibliothek ohne nach und nach `get_vod_info` abzufragen.
+
+Bis der nächste Sync die alten, auf 12 Namen gekürzten Einträge nachzieht, enthält der veröffentlichte Index nur die bisher gespeicherte Besetzung. Jede Nacht kommt ein weiteres Stück der vollen Credits dazu.
+
 ## Hinweise
 
 - Das Repository ist öffentlich, damit die App die Dateien ohne Token lesen kann. Lege hier **keine** Passwörter oder API-Schlüssel in Dateien ab.
