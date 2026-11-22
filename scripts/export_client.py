@@ -104,8 +104,8 @@ def pack_person(rec):
 
 def people_groups(entries):
     """Invert TMDB credits: normalized person name -> compact title-id lists.
-    Full records live in the prefix bucket of the whole name; the last-name
-    bucket gets a stub so a search for 'Sandler' still finds Adam Sandler."""
+    Full records live in the prefix bucket of the whole name. The last-name
+    bucket holds a compact list {l:[...]} so a search for 'Sandler' still works."""
     people = {}
     def rec(name, pid, photo):
         k = norm(name)
@@ -135,7 +135,7 @@ def people_groups(entries):
             tid = 0
         if not tid:
             continue
-        for c in e.get('cast') or []:
+        for c in list(e.get('cast') or []) + list(e.get('castExtra') or e.get('cx') or []):
             if not isinstance(c, dict) or not c.get('name'):
                 continue
             r = rec(c['name'], c.get('id'), c.get('profilePath') or c.get('photo'))
@@ -157,13 +157,15 @@ def people_groups(entries):
             if len(last) >= 2:
                 b = people_prefix(last)
                 bucket_items = groups.setdefault(b, {})
-                if k not in bucket_items:
-                    stub = {'r': k, 'n': r['n']}
-                    if r.get('id'):
-                        stub['i'] = r['id']
-                    if r.get('p'):
-                        stub['p'] = r['p']
-                    bucket_items[k] = stub
+                slot = bucket_items.get(last)
+                # Compact last-name list instead of copying every full record into the bucket.
+                # If "sandler" is itself a person record, hang the list on that object.
+                if slot is None:
+                    bucket_items[last] = {'l': [k]}
+                elif isinstance(slot, dict):
+                    lst = slot.setdefault('l', [])
+                    if k not in lst:
+                        lst.append(k)
     return groups, len(people)
 
 def split_oversized_people(groups, max_bytes=2 * 1024 * 1024):
@@ -271,7 +273,8 @@ def export(data_dir: Path):
         if not re.fullmatch(r'(id|title|meta|adult|people)-[a-z0-9]+-[a-f0-9]{16}\.json', p.name):
             continue
         last_used = now if p.name in keep else retention.get(p.name, now)
-        if p.name not in keep and last_used < now-35*86400:
+        keep_days = 7 if p.name.startswith('people-') else 35
+        if p.name not in keep and last_used < now-keep_days*86400:
             p.unlink()
         else:
             tracked[p.name] = last_used

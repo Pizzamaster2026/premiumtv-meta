@@ -51,7 +51,8 @@ class CustomerCacheTest(unittest.TestCase):
                 'movie:55': {
                     'tmdbId': 55, 'type': 'movie', 'title': 'Happy Film', 'originalTitle': 'Happy Film',
                     'year': '2010', 'voteAverage': 7.0, 'voteCount': 100, 'genres': ['Komödie'],
-                    'cast': movie_cast,
+                    'cast': movie_cast[:8],
+                    'castExtra': movie_cast[8:],
                     'directors': [{'id': 7, 'name': 'Dennis Dugan'}],
                     'creditsRev': 1,
                 },
@@ -100,9 +101,10 @@ class CustomerCacheTest(unittest.TestCase):
             self.assertEqual(sandler['p'], '/adam.jpg')
             self.assertEqual(sandler['m'], [55])
             san = json.loads((d / 'client-v1' / m['maps']['people']['chunks']['san']['file']).read_text())['items']
-            self.assertEqual(san['adam sandler']['r'], 'adam sandler')
+            self.assertIn('adam sandler', san['sandler']['l'])
+            self.assertNotIn('r', san.get('adam sandler') or {})
             ode = json.loads((d / 'client-v1' / m['maps']['people']['chunks']['ode']['file']).read_text())['items']
-            self.assertEqual(ode['bob odenkirk']['r'], 'bob odenkirk')
+            self.assertIn('bob odenkirk', ode['odenkirk']['l'])
             self.assertEqual(people['cameo star']['i'], 99)
             self.assertEqual(people['cameo star']['m'], [55])
             self.assertIn(1396, people['bob odenkirk']['s'])

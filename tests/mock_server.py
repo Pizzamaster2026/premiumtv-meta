@@ -47,9 +47,10 @@ MOVIES = {
             {"id": 1158, "name": "Al Pacino", "character": "Michael Corleone", "profile_path": "/pacino.jpg", "order": 1},
         ] + [
             {"id": 9000 + i, "name": "Extra Actor %02d" % i, "character": "Extra", "order": 10 + i}
-            for i in range(1, 16)
+            for i in range(1, 50)
         ] + [
             {"id": 9100, "name": "Cameo Star", "character": "Cameo", "order": 40},
+            {"id": 9200, "name": "Deep Extra", "character": "Background", "order": 80},
         ], "crew": [
             {"id": 1776, "name": "Francis Ford Coppola", "job": "Director", "department": "Directing"},
             {"id": 1, "name": "Not A Director", "job": "Producer", "department": "Production"},
@@ -91,6 +92,10 @@ TV = {
         "aggregate_credits": {"cast": [
             {"id": 17419, "name": "Bryan Cranston", "roles": [{"character": "Walter White"}], "order": 0, "total_episode_count": 62, "profile_path": "/bryan.jpg"},
             {"id": 14319, "name": "Bob Odenkirk", "roles": [{"character": "Saul Goodman"}], "order": 8, "total_episode_count": 37, "profile_path": "/saul.jpg"},
+            {"id": 15000, "name": "Walk On Guest", "roles": [{"character": "Customer"}], "order": 80, "total_episode_count": 1},
+        ] + [
+            {"id": 16000 + i, "name": "Day Player %02d" % i, "roles": [{"character": "Extra"}], "order": 20 + i, "total_episode_count": 1}
+            for i in range(1, 26)
         ]},
     },
     2316: {

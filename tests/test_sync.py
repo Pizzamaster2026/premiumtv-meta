@@ -97,11 +97,18 @@ def test_full_sync_and_incremental(base: str):
         expect("cast brando", g["cast"][0]["name"] == "Marlon Brando" and g["cast"][0]["id"] == 3084)
         expect("director from same credits payload", g["directors"][0]["name"] == "Francis Ford Coppola" and g["directors"][0]["id"] == 1776)
         expect("producers are not stored as directors", len(g["directors"]) == 1)
-        expect("creditsRev stored", g.get("creditsRev") == 1)
-        expect("full movie credits beyond top 12",
-               any(c.get("name") == "Cameo Star" for c in g["cast"]) and len(g["cast"]) >= 18)
+        expect("creditsRev stored", g.get("creditsRev") == 2)
+        expect("detail cast stays top-billed",
+               len(g["cast"]) <= 12 and g["cast"][0]["name"] == "Marlon Brando")
+        expect("supporting movie names go to slim castExtra",
+               any(c.get("name") == "Cameo Star" for c in g.get("castExtra") or []))
+        expect("movie billing past cap 50 is dropped",
+               not any(c.get("name") == "Deep Extra" for c in (g.get("cast") or []) + (g.get("castExtra") or [])))
+        bb = meta["entries"]["tv:1396"]
         expect("series uses aggregate guest credits",
-               any(c.get("name") == "Bob Odenkirk" for c in meta["entries"]["tv:1396"]["cast"]))
+               any(c.get("name") == "Bob Odenkirk" for c in (bb.get("cast") or []) + (bb.get("castExtra") or [])))
+        expect("one-episode walk-on past billed 20 is dropped",
+               not any(c.get("name") == "Walk On Guest" for c in (bb.get("cast") or []) + (bb.get("castExtra") or [])))
         expect("both providers share film",
                idx["byId"]["premiumtv:movie:1001"] == "movie:238"
                and idx["byId"]["one:movie:501"] == "movie:238")

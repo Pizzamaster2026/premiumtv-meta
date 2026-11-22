@@ -52,9 +52,16 @@ SEARCH_REV = 3
 DEFAULT_REMATCH_MAX = 1500
 TMDB_DEFAULT_BASE = "https://api.themoviedb.org/3"
 LANGUAGE = "de-DE"
-CAST_MAX = 400
+# Detail page / shard storage: top-billed only. The people index uses the wider caps
+# below and stores leftover names in slim `castExtra` (id+name), so shards stay small.
+CAST_DETAIL_MAX = 12
+CAST_MOVIE_MAX = 50
+CAST_SERIES_MAX = 100
+SERIES_ALWAYS_BILLED = 20
+SERIES_MIN_EPISODES = 2
 DIRECTOR_MAX = 4
-CREDITS_REV = 1
+# Bump when the stored-credits policy changes (full 400-cast was too large for the repo).
+CREDITS_REV = 2
 OVERVIEW_MAX = 2000
 SHARD_BYTES = 8 * 1024 * 1024
 RATE_MAX = 40
@@ -689,31 +696,76 @@ def normalize_details(typ: str, data: dict) -> dict:
             return str(roles[0].get("character") or "").strip()
         return ""
 
-    rows = [c for c in cast_in if isinstance(c, dict)]
-    rows.sort(key=_order)
-    cast, seen_cast = [], set()
-    for c in rows:
-        if len(cast) >= CAST_MAX:
-            break
+    def _episodes(c: dict) -> int:
+        try:
+            return int(c.get("total_episode_count") if c.get("total_episode_count") is not None else c.get("episode_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+    def _person(c: dict):
         try:
             pid = int(c.get("id") or 0)
         except (TypeError, ValueError):
             pid = 0
         name = str(c.get("name") or "").strip()
         if not name:
+            return None
+        return pid, name, pid or name.lower()
+
+    rows = [c for c in cast_in if isinstance(c, dict)]
+    rows.sort(key=_order)
+    # People-index set: movies top 50 billed; series top 20 billed plus recurring
+    # guests (episode_count >= 2), cap 100, ranked by episode count then billing.
+    index_rows = []
+    seen_idx = set()
+    def take(c):
+        parsed = _person(c)
+        if not parsed:
+            return
+        pid, name, mark = parsed
+        if mark in seen_idx:
+            return
+        if typ == "series" and len(index_rows) >= CAST_SERIES_MAX:
+            return
+        if typ != "series" and len(index_rows) >= CAST_MOVIE_MAX:
+            return
+        seen_idx.add(mark)
+        index_rows.append(c)
+    if typ == "series":
+        for c in rows[:SERIES_ALWAYS_BILLED]:
+            take(c)
+        by_eps = sorted(rows, key=lambda c: (-_episodes(c), _order(c)))
+        for c in by_eps:
+            if _episodes(c) >= SERIES_MIN_EPISODES:
+                take(c)
+    else:
+        for c in rows[:CAST_MOVIE_MAX]:
+            take(c)
+
+    cast, seen_cast = [], set()
+    for c in rows:
+        if len(cast) >= CAST_DETAIL_MAX:
+            break
+        parsed = _person(c)
+        if not parsed:
             continue
-        mark = pid or name.lower()
+        pid, name, mark = parsed
         if mark in seen_cast:
             continue
         seen_cast.add(mark)
-        # First 12 keep character + photo for the detail page; the rest stay slim for the people index.
-        item = {"id": pid or None, "name": name}
-        if len(cast) < 12:
-            item["character"] = _character(c)
-            item["profilePath"] = _safe_path(c.get("profile_path"))
-        elif _safe_path(c.get("profile_path")):
-            item["profilePath"] = _safe_path(c.get("profile_path"))
+        item = {"id": pid or None, "name": name, "character": _character(c), "profilePath": _safe_path(c.get("profile_path"))}
         cast.append(item)
+    # Slim leftovers (id+name only) so the people map can invert them without bloating the detail payload.
+    detail_marks = set(seen_cast)
+    cast_extra = []
+    for c in index_rows:
+        parsed = _person(c)
+        if not parsed:
+            continue
+        pid, name, mark = parsed
+        if mark in detail_marks:
+            continue
+        detail_marks.add(mark)
+        cast_extra.append({"id": pid or None, "name": name})
     # Directors come from the same append_to_response=credits payload – no extra TMDB request.
     crew_in = credits.get("crew") if isinstance(credits.get("crew"), list) else []
     directors, seen_dir = [], set()
@@ -760,6 +812,7 @@ def normalize_details(typ: str, data: dict) -> dict:
         "posterPath": _safe_path(data.get("poster_path")),
         "backdropPath": _safe_path(data.get("backdrop_path")),
         "cast": cast,
+        "castExtra": cast_extra,
         "directors": directors,
         "creditsRev": CREDITS_REV,
     }

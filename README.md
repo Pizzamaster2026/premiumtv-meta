@@ -169,7 +169,7 @@ Regeln für die App: Die Map `adult` nur lesen, wenn Erwachsenen-Inhalte per PIN
 
 ### Schauspieler-Index (Map `people`)
 
-Die nächtliche Sync speichert die **volle Besetzung** jedes zugeordneten Titels (`CAST_MAX` 400). Bei Serien kommt `append_to_response=credits,aggregate_credits` zum Einsatz, damit auch Gastrollen aus allen Staffeln im Index landen – nicht nur die Hauptdarsteller der Serien-Credits. Einträge ohne `creditsRev` 1 werden auch dann nachgeladen, wenn sie sonst noch frisch wären (budgetiert, über mehrere Nächte).
+Die nächtliche Sync holt bei Filmen die Credits, bei Serien `credits,aggregate_credits` (Gastrollen aller Staffeln, eine Anfrage). In den Meta-Shards bleibt nur die **Top-12-Besetzung** der Detailseite. Für den Suchindex gelten sinnvolle Grenzen, damit das öffentliche Repo und die TV-Downloads klein bleiben: Filme die ersten 50 nach Billing, Serien die Top 20 plus wiederkehrende Gäste (`total_episode_count` ≥ 2), höchstens 100. Die weiteren Namen liegen schlank in `castExtra` (nur id+name) und werden nur in die Map `people` invertiert, nicht in die Kunden-Meta-Map. Einträge ohne `creditsRev` 2 werden nachgeladen, budgetiert über mehrere Nächte. Alte `people`-Chunks werden nach 7 Tagen gelöscht (übrige Maps nach 35).
 
 `export_client.py` baut aus den **Roh-Einträgen** (nicht aus der auf 8 Namen gekürzten Meta-Map) die Map `people`:
 
