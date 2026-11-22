@@ -96,4 +96,39 @@ setup; cd "$ROOT/job"; before="$(git rev-parse HEAD)"
 bash "$PUB" "chore: test" data/adult-tpdb.json data/status.json data/client-v1 > "$ROOT/out" 2>&1 || fail "no-op returned non-zero"
 [ "$(git rev-parse HEAD)" = "$before" ] || fail "no-op created a commit"
 pass "no changes: exit 0, no commit"
+
+# 7) regression run 45006009953: sync job started from a STALE commit, the adult job had
+#    meanwhile pushed status.json -> old recipe: rebase conflict; new: lands, our sync output wins
+setup
+git clone -q -b main "$ROOT/remote.git" "$ROOT/other"
+( cd "$ROOT/other" && echo '{"version":1,"coveragePct":80,"adult":{"withCover":256}}' > data/status.json \
+  && git commit -qam "adult covers" && git push -q origin HEAD:main )
+cd "$ROOT/job"   # still at the old commit (like checkout of the trigger SHA)
+echo '{"version":1,"coveragePct":89,"adult":{"withCover":256}}' > data/status.json
+echo '{"v":"tmdb"}' > data/index.json
+git add -u data/ && git commit -q -m old
+if git pull -q --rebase origin main >/dev/null 2>&1; then fail "old recipe unexpectedly rebased"; fi
+git rebase --abort >/dev/null 2>&1 || true
+git reset -q --soft HEAD~1
+pass "old sync recipe: status.json conflict reproduced"
+bash "$PUB" "chore: TMDB" data/index.json data/status.json > "$ROOT/out" 2>&1 || { cat "$ROOT/out"; fail "sync publish failed on stale base"; }
+remote_show data/status.json | grep -q '"coveragePct":89' || fail "sync status not on main"
+remote_show data/index.json | grep -q tmdb || fail "sync index not on main"
+pass "stale base + status.json conflict: sync output lands"
+
+# 8) derived files (export): conflict -> rebuild on the newest main instead of overwriting it
+setup
+git clone -q -b main "$ROOT/remote.git" "$ROOT/other"
+( cd "$ROOT/other" && echo '{"version":1,"maps":{"id":{},"adult":{"count":64,"n":300}}}' > data/client-v1/manifest.json \
+  && git commit -qam "adult job export" && git push -q origin HEAD:main )
+cd "$ROOT/job"
+echo '{"version":1,"maps":{"id":{"stale":1}}}' > data/client-v1/manifest.json
+PUBLISH_REGEN='python3 -c "import json;p=\"data/client-v1/manifest.json\";m=json.load(open(p));m[\"regen\"]=1;json.dump(m,open(p,\"w\"))"' \
+  bash "$PUB" "chore: export" data/client-v1 > "$ROOT/out" 2>&1 || { cat "$ROOT/out"; fail "regen publish failed"; }
+m="$(remote_show data/client-v1/manifest.json)"
+echo "$m" | grep -q '"n": 300' || fail "regen overwrote newer adult map: $m"
+echo "$m" | grep -q '"regen": 1' || fail "regen output not pushed: $m"
+echo "$m" | grep -q stale && fail "stale export output pushed: $m"
+grep -q "Baue neu" "$ROOT/out" || fail "regen path not taken"
+pass "export conflict: rebuilt on newest main, newer adult map kept"
 echo ALL PASS

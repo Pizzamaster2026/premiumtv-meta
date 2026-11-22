@@ -1,10 +1,10 @@
 name: Metadata regression tests
 on:
   pull_request:
-    paths: ['scripts/**', 'tests/**', 'player/**', '.github/workflows/test-metadata.yml', '.github/workflows/sync-meta.yml']
+    paths: ['scripts/**', 'tests/**', 'player/**', '.github/workflows/test-metadata.yml', '.github/workflows/sync-meta.yml', '.github/workflows/export-client.yml', '.github/workflows/sync-sport.yml']
   push:
     branches: [main]
-    paths: ['scripts/**', 'tests/**', 'player/**', '.github/workflows/sync-meta.yml']
+    paths: ['scripts/**', 'tests/**', 'player/**', '.github/workflows/sync-meta.yml', '.github/workflows/export-client.yml', '.github/workflows/sync-sport.yml']
 permissions:
   contents: read
 jobs:

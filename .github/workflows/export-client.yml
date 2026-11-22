@@ -26,12 +26,10 @@ jobs:
           python-version: '3.12'
       - name: Export locally without provider or TMDB calls
         run: python3 scripts/export_client.py --data-dir data
+      # Derived files only: on a conflict scripts/git_publish.sh rebuilds the export on top
+      # of the newest main (PUBLISH_REGEN) instead of overwriting newer covers/metadata.
       - name: Publish complete cache generation
+        env:
+          PUBLISH_REGEN: python3 scripts/export_client.py --data-dir data
         run: |
-          git add -A data/client-v1/
-          if git diff --cached --quiet; then exit 0; fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore: publish compact customer metadata cache'
-          git pull --rebase origin main
-          git push origin HEAD:main
+          bash scripts/git_publish.sh 'chore: publish compact customer metadata cache' data/client-v1

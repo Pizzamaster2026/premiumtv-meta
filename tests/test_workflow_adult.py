@@ -50,10 +50,53 @@ class AdultJob(unittest.TestCase):
             self.assertIn(p, c)
         self.assertNotRegex(c, r'git pull --rebase(?! --autostash)')
 
-    def test_sync_job_unchanged_contract(self):
+    def test_sync_job_does_not_run_adult_step(self):
         s = job('sync')
         self.assertNotIn('adult_tpdb', s)
-        self.assertNotIn('git_publish', s)
+
+
+ROOTWF = Path(__file__).resolve().parent.parent / '.github' / 'workflows'
+
+
+class AllPushingWorkflows(unittest.TestCase):
+    """Run 45006009953: a queued sync started from the trigger commit (stale) and its plain
+    `git pull --rebase` hit a status.json conflict with the adult job -> TMDB results lost."""
+
+    def test_sync_checks_out_main_and_publishes_robustly(self):
+        s = job('sync')
+        self.assertRegex(s, r'uses: actions/checkout@v4\n\s+with:\n\s+ref: main')
+        c = steps(s)['Änderungen übernehmen']
+        self.assertIn('if: always()', c)
+        self.assertIn('scripts/git_publish.sh', c)
+        self.assertNotIn('continue-on-error', c)
+        for p in ('data/index.json', 'data/status.json', 'data/adult-titles.json', 'data/meta-*.json', 'git add -u data/'):
+            self.assertIn(p, c)
+
+    def test_no_plain_pull_rebase_left(self):
+        for f in ROOTWF.glob('*.yml'):
+            t = f.read_text(encoding='utf-8')
+            self.assertNotRegex(t, r'git pull --rebase(?! --autostash)', f.name)
+            self.assertNotRegex(t, r'\n\s+git push', f.name)
+
+    def test_every_pushing_workflow_uses_publisher_and_main(self):
+        for name in ('sync-meta.yml', 'export-client.yml', 'sync-sport.yml'):
+            t = (ROOTWF / name).read_text(encoding='utf-8')
+            self.assertIn('scripts/git_publish.sh', t, name)
+            self.assertRegex(t, r'uses: actions/checkout@v4\n\s+with:\n\s+ref: main', name)
+
+    def test_export_rebuilds_on_conflict(self):
+        t = (ROOTWF / 'export-client.yml').read_text(encoding='utf-8')
+        self.assertIn('PUBLISH_REGEN: python3 scripts/export_client.py --data-dir data', t)
+        self.assertIn('data/client-v1', t)
+
+    def test_sport_publishes_only_sport_json(self):
+        t = (ROOTWF / 'sync-sport.yml').read_text(encoding='utf-8')
+        self.assertRegex(t, r'git_publish\.sh "chore: Sportplan aktualisieren" data/sport\.json\n')
+
+    def test_regression_tests_watch_all_workflows(self):
+        t = (ROOTWF / 'test-metadata.yml').read_text(encoding='utf-8')
+        for name in ('sync-meta.yml', 'export-client.yml', 'sync-sport.yml'):
+            self.assertIn('.github/workflows/' + name, t)
 
 
 class Publisher(unittest.TestCase):
@@ -63,6 +106,7 @@ class Publisher(unittest.TestCase):
         self.assertIn('PUBLISH_RETRIES', sh)
         self.assertIn('::error', sh)
         self.assertIn('git add -A', sh)
+        self.assertIn('PUBLISH_REGEN', sh)
 
 
 if __name__ == '__main__':

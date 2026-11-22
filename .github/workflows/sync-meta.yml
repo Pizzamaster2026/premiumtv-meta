@@ -20,8 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      # ref: main, not the trigger commit: a queued run (concurrency group) would
+      # otherwise start from a stale commit and conflict with what the previous
+      # run pushed (run 45006009953: status.json conflict, TMDB results lost).
       - name: Repository auschecken
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Python einrichten
         uses: actions/setup-python@v5
@@ -70,27 +75,16 @@ jobs:
         if: always()
         run: |
           rm -f data/.changed
-          # Add each existing output separately. A single `git add` with a missing
-          # path (there is no data/meta.json, only data/meta-*.json shards) would
-          # abort the whole add; `|| true` hid that, and `git add -u` does not
-          # pick up a newly written, still-untracked data/status.json.
+          # Every tracked file the sync rewrote, plus outputs that may be new/untracked.
+          # data/status.json is also written by the adult-covers job; write_status keeps
+          # its 'adult' counts. scripts/git_publish.sh: --autostash, retries on push
+          # races, our fresh output wins a conflict, a final failure turns this step red.
           git add -u data/
+          files=""
           for f in data/index.json data/status.json data/adult-titles.json data/meta.json data/meta-*.json; do
-            if [ -e "$f" ]; then
-              git add -- "$f"
-            fi
+            if [ -e "$f" ]; then files="$files $f"; fi
           done
-          if git diff --cached --quiet; then
-            echo "Keine Änderungen am Cache."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: TMDB-Metadaten aktualisieren"
-          # The Manager app may have uploaded a new titles file meanwhile;
-          # it touches only data/titles_*.json.gz, so a rebase is conflict-free.
-          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
-          git push
+          bash scripts/git_publish.sh "chore: TMDB-Metadaten aktualisieren" ${files:-data/status.json}
 
   # Adult covers from ThePornDB (only for titles the sync marks as adult).
   # Separate job so it can never eat into the TMDB time budget. The run stays
