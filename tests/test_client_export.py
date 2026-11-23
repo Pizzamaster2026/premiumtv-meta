@@ -37,7 +37,8 @@ class CustomerCacheTest(unittest.TestCase):
                 for v in mp['chunks'].values():
                     raw=(d/'client-v1'/v['file']).read_bytes()
                     self.assertNotIn(b'DO_NOT_EXPORT',raw)
-                    self.assertEqual(hashlib.sha256(raw).hexdigest(),v['sha256'])
+                    if 'sha256' in v:
+                        self.assertEqual(hashlib.sha256(raw).hexdigest(),v['sha256'])
             self.assertEqual(export(d),m)
             self.assertEqual(norm('Die Eiskönigin: 2'),'die eiskonigin 2')
 
@@ -114,6 +115,37 @@ class CustomerCacheTest(unittest.TestCase):
             self.assertEqual(people_prefix('sandler'), 'san')
             self.assertIn('ada', m['maps']['people']['chunks'])
             self.assertIn('san', m['maps']['people']['chunks'])
+            for b, v in m['maps']['people']['chunks'].items():
+                self.assertEqual(set(v.keys()), {'file'})
+                self.assertTrue(v['file'].startswith('people-'))
+            self.assertEqual(m['maps']['people']['index'], 'people-index.json')
+            idx = json.loads((d / 'client-v1' / 'people-index.json').read_text())
+            self.assertIn('sha256', idx['chunks']['ada'])
+            man_bytes = (d / 'client-v1' / 'manifest.json').stat().st_size
+            self.assertLessEqual(man_bytes, 2 * 1024 * 1024)
+
+    def test_people_listing_is_compact_enough_for_thousands_of_prefixes(self):
+        # Regression for "Manifest too large" at 512 KiB: ~6700 prefix3 buckets
+        # with sha256/bytes were ~1118 KiB; 0.2.20 only needs {file}.
+        from export_client import encode
+        prefixes = [f'{a}{b}{c}' for a in 'abcdefghijklmnopqrstuvwxyz'
+                    for b in 'abcdefghijklmnopqrstuvwxyz' for c in 'abcdefghijklmnopqrstuvwxyz'][:6720]
+        compact = {p: {'file': f'people-{p}-0123456789abcdef.json'} for p in prefixes}
+        full = {p: {'file': compact[p]['file'], 'bytes': 12345, 'sha256': 'ab'*32} for p in prefixes}
+        man = encode({'version':1,'maps':{
+            'id':{'count':256,'chunks':{str(i):{'file':f'id-{i}-0123456789abcdef.json','bytes':1,'sha256':'cd'*32} for i in range(256)}},
+            'title':{'count':256,'chunks':{str(i):{'file':f'title-{i}-0123456789abcdef.json','bytes':1,'sha256':'cd'*32} for i in range(256)}},
+            'meta':{'count':1024,'chunks':{str(i):{'file':f'meta-{i}-0123456789abcdef.json','bytes':1,'sha256':'cd'*32} for i in range(1024)}},
+            'people':{'count':len(compact),'scheme':'prefix3','index':'people-index.json','chunks':compact},
+        }})
+        bloated = encode({'version':1,'maps':{'people':{'chunks':full}}})
+        self.assertGreater(len(bloated), 512*1024)
+        self.assertLessEqual(len(man), 2*1024*1024)
+        # {file} is what 0.2.20 reads: MetaCache.chunk(..., info.file)
+        self.assertIn(b'"file":"people-aaa-0123456789abcdef.json"', man)
+        people_map = json.loads(man)['maps']['people']['chunks']
+        self.assertEqual(set(people_map['aaa'].keys()), {'file'})
+        self.assertNotIn('sha256', people_map['aaa'])
 
     def test_stale_credits_need_refresh(self):
         now = datetime.now(timezone.utc)

@@ -188,7 +188,10 @@ def split_oversized_people(groups, max_bytes=2 * 1024 * 1024):
             out[nb] = items
     return out
 
-def write_chunks(kind, groups, out, keep):
+def write_chunks(kind, groups, out, keep, listing='full'):
+    """listing='full' keeps bytes+sha256 (id/title/meta/adult).
+    listing='file' stores only {file} so thousands of people prefix3
+    buckets do not blow the manifest (0.2.20 reads only info.file)."""
     paths = {}
     for b, values in groups.items():
         raw = encode({'version': 1, 'items': values})
@@ -200,7 +203,10 @@ def write_chunks(kind, groups, out, keep):
         if not dest.exists():
             dest.write_bytes(raw)
         keep.add(name)
-        paths[str(b)] = {'file': name, 'bytes': len(raw), 'sha256': digest}
+        if listing == 'file':
+            paths[str(b)] = {'file': name}
+        else:
+            paths[str(b)] = {'file': name, 'bytes': len(raw), 'sha256': digest}
     return paths
 
 def encode(obj):
@@ -259,10 +265,29 @@ def export(data_dir: Path):
         manifest['maps'][kind] = {'count':count,'chunks':paths}
     if people:
         people = split_oversized_people(people)
-        paths = write_chunks('people', people, out, keep)
-        manifest['maps']['people'] = {'count': len(paths), 'scheme': 'prefix3', 'chunks': paths}
+        # Full hashes live in people-index.json (not read by player 0.2.20).
+        # The main manifest only keeps {file} per prefix, which 0.2.20 already understands.
+        full_paths = write_chunks('people', people, out, keep, listing='full')
+        compact_paths = {b: {'file': v['file']} for b, v in full_paths.items()}
+        index_name = 'people-index.json'
+        index_body = encode({'version': 1, 'scheme': 'prefix3', 'chunks': full_paths})
+        if len(index_body) > 2 * 1024 * 1024:
+            raise ValueError('People index too large')
+        tmpi = out / 'people-index.tmp'
+        tmpi.write_bytes(index_body)
+        tmpi.replace(out / index_name)
+        manifest['maps']['people'] = {
+            'count': len(compact_paths),
+            'scheme': 'prefix3',
+            'index': index_name,
+            'chunks': compact_paths,
+        }
+    # 0.2.20 fetches manifest.json with no size cap and already loads 2 MiB people
+    # chunks. A 512 KiB cap is too small once prefix3 lists ~6700 people buckets
+    # (~1118 KiB with hashes, ~539 KiB with {file} only; both grow with backfill).
     raw = encode(manifest)
-    if len(raw) > 512*1024: raise ValueError('Manifest too large')
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError('Manifest too large')
     tmp = out/'manifest.tmp'; tmp.write_bytes(raw); tmp.replace(out/'manifest.json')
     # Persist timestamps: Git checkouts reset filesystem modification times.
     retention_path = out/'retention.json'

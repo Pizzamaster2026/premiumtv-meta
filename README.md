@@ -174,9 +174,11 @@ Die nächtliche Sync holt bei Filmen die Credits, bei Serien `credits,aggregate_
 `export_client.py` baut aus den **Roh-Einträgen** (nicht aus der auf 8 Namen gekürzten Meta-Map) die Map `people`:
 
 ```json
-"maps":{"people":{"count":577,"scheme":"prefix3","chunks":{"ada":{"file":"people-ada-<sha16>.json","bytes":123,"sha256":"…"}}}},
+"maps":{"people":{"count":577,"scheme":"prefix3","index":"people-index.json","chunks":{"ada":{"file":"people-ada-<sha16>.json"}}}},
 "counts":{"people":123456}
 ```
+
+Die App 0.2.20 liest nur `chunks.<prefix>.file` aus `manifest.json`. Deshalb stehen im Manifest selbst keine `bytes`/`sha256` der People-Dateien (sonst wird es größer als 512 KB). Die vollständigen Hashes liegen in `people-index.json`.
 
 - Bucket = die ersten drei Buchstaben des normalisierten Namens (`adam sandler` → `ada`). Ein 2-Buchstaben-Suchbegriff lädt alle Buckets, deren Schlüssel so beginnt. Wird ein Bucket größer als 2 MiB, wird er auf 4 Buchstaben gesplittet.
 - Volle Einträge liegen im Bucket des ganzen Namens: `{"n":"Adam Sandler","i":66580,"p":"/….jpg","m":[123,456],"s":[789],"d":[],"ds":[]}`. `m`/`s` sind TMDB-IDs (Filme / Serien), `d`/`ds` Regie.
