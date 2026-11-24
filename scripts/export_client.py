@@ -66,7 +66,8 @@ def adult_items(data_dir: Path):
         r = cache.get(aq['key'])
         if not isinstance(r, dict) or r.get('status') != 'match' or not https_url(r.get('poster')):
             continue
-        out[key] = {'adult': True, 'q': aq['key'], 'src': 'scene' if r.get('source') == 'scene' else 'movie',
+        src = 'scene' if r.get('source') in ('scene', 'stashdb-scene') else 'movie'
+        out[key] = {'adult': True, 'q': aq['key'], 'src': src,
                     'title': str(r.get('title') or '')[:200], 'site': str(r.get('site') or '')[:80],
                     'year': str(r.get('year') or '')[:4] if str(r.get('year') or '')[:4].isdigit() else '',
                     'poster': https_url(r.get('poster')), 'backdrop': https_url(r.get('background')),

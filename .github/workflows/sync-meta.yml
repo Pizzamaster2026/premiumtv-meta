@@ -100,7 +100,8 @@ jobs:
           done
           bash scripts/git_publish.sh "chore: TMDB-Metadaten aktualisieren" ${files:-data/status.json}
 
-  # Adult covers from ThePornDB (only for titles the sync marks as adult).
+  # Adult covers from ThePornDB, then StashDB for remaining misses
+  # (only for titles the sync marks as adult).
   # Separate job so it can never eat into the TMDB time budget. The run stays
   # green (job-level continue-on-error, the script always exits 0), so the
   # customer export (workflow_run on success) still runs. A failed push of the
@@ -128,7 +129,9 @@ jobs:
         timeout-minutes: 32
         env:
           TPDB_API_KEY: ${{ secrets.TPDB_API_KEY }}
+          STASHDB_API_KEY: ${{ secrets.STASHDB_API_KEY }}
           # ~1 request per second, cap per run; the rest waits for the next night.
+          # Shared with the StashDB fallback (ThePornDB pending first, leftover after).
           TPDB_MIN_INTERVAL_SEC: "1.0"
           TPDB_MAX_REQUESTS: "1500"
           TPDB_BUDGET_MIN: "28"

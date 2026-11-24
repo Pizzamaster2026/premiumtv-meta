@@ -10,8 +10,11 @@ Output  (via export_client.py)   data/client-v1/adult-*.json, map "adult"
 
 Rules
 - Secret only from env TPDB_API_KEY (GitHub secret). Never logged, never written.
+- After ThePornDB misses, a StashDB fallback uses STASHDB_API_KEY the same way
+  (optional: if the secret is missing the fallback is skipped and the job stays green).
 - ~1 request/second (TPDB_MIN_INTERVAL_SEC), at most TPDB_MAX_REQUESTS per run,
-  at most TPDB_BUDGET_MIN minutes. Unfinished titles simply wait for the next night.
+  at most TPDB_BUDGET_MIN minutes, shared: ThePornDB pending first, leftover for StashDB.
+  Unfinished titles simply wait for the next night.
 - Only confident matches (title similarity, site check, year check, no ties).
 - Performer image via /performers?q= only when exactly one performer has that name.
 - Never fails the workflow: every error is logged (without titles or the key)
@@ -573,9 +576,17 @@ def update_status(data_dir: Path, publish: bool = True) -> Path:
 
 
 def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbClient] = None,
-             now: Optional[datetime] = None) -> dict:
-    """Never raises. Returns counts."""
-    stats = {"pending": 0, "asked": 0, "matched": 0, "missed": 0, "failed": 0, "requests": 0, "stopped": ""}
+             now: Optional[datetime] = None, stashdb_client=None, stashdb_token: Optional[str] = None) -> dict:
+    """Never raises. Returns counts.
+
+    StashDB is only initialised from STASHDB_API_KEY in the production path
+    (neither a TPDB client nor a TPDB token was passed in). Tests therefore
+    never hit the live API. Pass stashdb_client or stashdb_token to exercise it.
+    An empty stashdb_token skips the fallback (same as a missing secret).
+    """
+    stats = {"pending": 0, "asked": 0, "matched": 0, "missed": 0, "failed": 0, "requests": 0, "stopped": "",
+             "stashdbPending": 0, "stashdbAsked": 0, "stashdbMatched": 0, "stashdbMissed": 0,
+             "stashdbFailed": 0, "stashdbRequests": 0, "stashdbStopped": ""}
     data_dir = Path(data_dir)
     cache: Optional[dict] = None
     now_iso = ""
@@ -588,50 +599,87 @@ def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbC
             log("Keine Erwachsenen-Titelliste (data/adult-titles.json) – nichts zu tun.")
             return stats
         cache = load_cache(data_dir)
+        # Production (main()) passes neither a client nor a token; only then
+        # may we read STASHDB_API_KEY from the environment.
+        production = client is None and token is None
         todo = pending_queries(titles, cache["titles"], now)
         stats["pending"] = len(todo)
+        min_interval = env_float("TPDB_MIN_INTERVAL_SEC", DEFAULT_MIN_INTERVAL)
+        max_requests = int(env_float("TPDB_MAX_REQUESTS", DEFAULT_MAX_REQUESTS))
+        budget_sec = env_float("TPDB_BUDGET_MIN", DEFAULT_BUDGET_MIN) * 60
         if client is None:
             token = (token if token is not None else os.environ.get("TPDB_API_KEY", "")).strip()
             if not token:
                 log("TPDB_API_KEY fehlt – Schritt übersprungen.")
-                return stats
-            client = TpdbClient(
-                token,
-                base=os.environ.get("TPDB_API_BASE", API_BASE).strip() or API_BASE,
-                min_interval=env_float("TPDB_MIN_INTERVAL_SEC", DEFAULT_MIN_INTERVAL),
-                max_requests=int(env_float("TPDB_MAX_REQUESTS", DEFAULT_MAX_REQUESTS)),
-                budget_sec=env_float("TPDB_BUDGET_MIN", DEFAULT_BUDGET_MIN) * 60,
-            )
-        log(f"{len(titles)} Erwachsenen-Einträge, {len(todo)} Suchbegriffe offen, "
-            f"höchstens {client.max_requests} Anfragen in diesem Lauf.")
-        try:
-            for aq in todo:
-                if client.left() <= 0:
-                    raise StopRun("cap")
-                rec = lookup_title(client, aq, now_iso)
-                stats["asked"] += 1
-                if rec is None:
-                    stats["failed"] += 1
-                    continue
-                if rec["status"] == "match":
-                    try:
-                        fill_performer_images(client, rec, cache["performers"], now, now_iso)
-                    except StopRun:
-                        cache["titles"][aq["key"]] = rec
+            else:
+                client = TpdbClient(
+                    token,
+                    base=os.environ.get("TPDB_API_BASE", API_BASE).strip() or API_BASE,
+                    min_interval=min_interval,
+                    max_requests=max_requests,
+                    budget_sec=budget_sec,
+                )
+        if client is not None:
+            log(f"{len(titles)} Erwachsenen-Einträge, {len(todo)} Suchbegriffe offen, "
+                f"höchstens {client.max_requests} Anfragen in diesem Lauf.")
+            try:
+                for aq in todo:
+                    if client.left() <= 0:
+                        raise StopRun("cap")
+                    rec = lookup_title(client, aq, now_iso)
+                    stats["asked"] += 1
+                    if rec is None:
+                        stats["failed"] += 1
+                        continue
+                    if rec["status"] == "match":
+                        try:
+                            fill_performer_images(client, rec, cache["performers"], now, now_iso)
+                        except StopRun:
+                            cache["titles"][aq["key"]] = rec
+                            stats["matched"] += 1
+                            raise
                         stats["matched"] += 1
-                        raise
-                    stats["matched"] += 1
-                else:
-                    stats["missed"] += 1
-                cache["titles"][aq["key"]] = rec
-        except StopRun as e:
-            stats["stopped"] = str(e)
-            log(f"Lauf beendet: {e}.")
-        stats["requests"] = client.calls
-        save_cache(data_dir, cache, now_iso)
-        total_match = sum(1 for r in cache["titles"].values() if r.get("status") == "match")
-        log(f"Fertig: {stats['asked']} gefragt, {stats['matched']} Treffer, {stats['missed']} ohne Treffer, "
-            f"{stats['failed']} Fehler, {client.calls} Anfragen; im Cache {total_match} Treffer.")
+                    else:
+                        stats["missed"] += 1
+                    cache["titles"][aq["key"]] = rec
+            except StopRun as e:
+                stats["stopped"] = str(e)
+                log(f"Lauf beendet: {e}.")
+            stats["requests"] = client.calls
+            save_cache(data_dir, cache, now_iso)
+            total_match = sum(1 for r in cache["titles"].values() if r.get("status") == "match")
+            log(f"Fertig: {stats['asked']} gefragt, {stats['matched']} Treffer, {stats['missed']} ohne Treffer, "
+                f"{stats['failed']} Fehler, {client.calls} Anfragen; im Cache {total_match} Treffer.")
+
+        # StashDB fallback: only status=miss (never junk, never unasked pending).
+        import adult_stashdb as S
+        if stashdb_client is None:
+            if stashdb_token is not None:
+                s_token = stashdb_token.strip()
+            elif production:
+                s_token = os.environ.get("STASHDB_API_KEY", "").strip()
+                if not s_token:
+                    S.log("STASHDB_API_KEY fehlt – StashDB übersprungen.")
+            else:
+                s_token = ""
+            if stashdb_client is None and (stashdb_token is not None or production) and not (stashdb_token is None and not production):
+                left, remain = S.remaining_from(client, max_requests, budget_sec)
+                if s_token and left > 0 and remain > 0:
+                    stashdb_client = S.maybe_client(s_token, left, remain, min_interval)
+                elif s_token:
+                    S.log("Kein Restbudget für StashDB in diesem Lauf.")
+        if stashdb_client is not None:
+            try:
+                S.run_fallback(cache, titles, stashdb_client, now, now_iso, stats)
+            except StopRun as e:
+                stats["stashdbStopped"] = str(e)
+                S.log(f"Lauf beendet: {e}.")
+            stats["stashdbRequests"] = stashdb_client.calls
+            save_cache(data_dir, cache, now_iso)
+            total_match = sum(1 for r in cache["titles"].values() if r.get("status") == "match")
+            S.log(f"Fertig: {stats['stashdbAsked']} gefragt, {stats['stashdbMatched']} Treffer, "
+                  f"{stats['stashdbMissed']} ohne Treffer, {stats['stashdbFailed']} Fehler, "
+                  f"{stashdb_client.calls} Anfragen; im Cache {total_match} Treffer.")
     except Exception as e:  # never fail the workflow
         stats["stopped"] = f"error {type(e).__name__}"
         log(f"Unerwarteter Fehler ({type(e).__name__}) – bisheriger Stand wird übernommen, Sync bleibt unberührt.")
@@ -643,7 +691,8 @@ def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbC
                 total_match = sum(1 for r in cache["titles"].values() if r.get("status") == "match")
                 log(f"Zwischenstand gespeichert: {stats['asked']} gefragt, {stats['matched']} Treffer, "
                     f"{stats['missed']} ohne Treffer, {stats['failed']} Fehler, "
-                    f"{stats['requests']} Anfragen; im Cache {total_match} Treffer.")
+                    f"{stats['requests']} Anfragen, StashDB {stats['stashdbAsked']} gefragt / "
+                    f"{stats['stashdbMatched']} Treffer; im Cache {total_match} Treffer.")
             except Exception:
                 log("Zwischenstand konnte nicht geschrieben werden.")
     finally:

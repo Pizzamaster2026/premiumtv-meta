@@ -51,7 +51,7 @@ Wenn du vorerst nur einen Anbieter nutzt, reicht der jeweilige Block (`PTV_*` **
 2. Links den Workflow **Sync TMDB-Metadaten** wählen.
 3. Rechts **Run workflow**. Beim Feld **mode**:
    - **full** (Standard): kompletter TMDB-Abgleich und danach die Erwachsenen-Cover. Der nächtliche Plan und der Button „Jetzt abgleichen“ im Manager starten immer diesen Modus, auch wenn keine Eingabe mitgeschickt wird (`{"ref":"main"}`).
-   - **adult**: nur die Erwachsenen-Cover bei ThePornDB, ohne den rund zweistündigen TMDB-Lauf (etwa 30–35 Minuten). Neue Erwachsenen-Titel aus dem Katalog kommen erst nach einem vollständigen Abgleich in die Liste.
+   - **adult**: nur die Erwachsenen-Cover (ThePornDB, danach StashDB), ohne den rund zweistündigen TMDB-Lauf (etwa 30–35 Minuten). Neue Erwachsenen-Titel aus dem Katalog kommen erst nach einem vollständigen Abgleich in die Liste.
 4. **Run workflow** klicken.
 
 Beim ersten vollen Lauf kann es länger dauern (viele neue Titel). Danach bleiben bekannte Einträge liegen, und es werden nur noch neue oder veraltete Titel bei TMDB abgefragt.
@@ -106,17 +106,18 @@ Format (Zeiten in UTC-Sekunden):
 
 `cat` (optional) = EPG-Sportkategorie. `kind`: `bl`, `bl2`, `cl`, `dfb`, `pl`, `fb` (anderer Fußball), `f1`, `moto`, `nfl`, `nba`, `ih` (Eishockey), `tennis`, `box`, `hb`, `darts`, `other`.
 
-## Erwachsenen-Cover (ThePornDB)
+## Erwachsenen-Cover (ThePornDB, danach StashDB)
 
-Für Titel, die der Abgleich als Erwachsenenfilm erkennt (gleiche Erkennung wie beim TMDB-Ausschluss: Katalog-Präfix `(XXX-)`, `title.looks_adult` / `sync_meta.is_adult_group`), sucht ein eigener Job **nach** dem TMDB-Abgleich passende Cover bei [ThePornDB](https://theporndb.net).
+Für Titel, die der Abgleich als Erwachsenenfilm erkennt (gleiche Erkennung wie beim TMDB-Ausschluss: Katalog-Präfix `(XXX-)`, `title.looks_adult` / `sync_meta.is_adult_group`), sucht ein eigener Job **nach** dem TMDB-Abgleich passende Cover zuerst bei [ThePornDB](https://theporndb.net). Titel, die ThePornDB sicher verfehlt hat (`status=miss`, keine Hash-Namen), werden danach bei [StashDB](https://stashdb.org) nachgefragt. Offene ThePornDB-Titel (noch nie gefragt) bleiben zuerst bei ThePornDB.
 
-- Workflow `sync-meta.yml`, Job `adult-covers` (läuft nach dem Job `sync`, auch wenn der fehlschlägt oder im Modus `adult` übersprungen wird; nicht nach Abbruch). Manueller Start: Actions → **Sync TMDB-Metadaten** → **Run workflow** → mode **adult**.
-- Schlüssel: Repository-Secret `TPDB_API_KEY` (Bearer). Er steht nie in Dateien oder im Log.
-- Höchstens ~1 Anfrage pro Sekunde, höchstens 1500 Anfragen und 28 Minuten pro Nacht (`TPDB_MIN_INTERVAL_SEC`, `TPDB_MAX_REQUESTS`, `TPDB_BUDGET_MIN`). Der Rest kommt in den nächsten Nächten dran.
+- Workflow `sync-meta.yml`, Job `adult-covers` (läuft nach dem Job `sync`, auch wenn der fehlschlägt oder im Modus `adult` übersprungen wird; nicht nach Abbruch). Manueller Start: Actions → **Sync TMDB-Metadaten** → **Run workflow** → mode **adult**, oder im Manager der Button „Nur Cover für Erwachsenenfilme“.
+- Schlüssel: Repository-Secrets `TPDB_API_KEY` (Bearer) und `STASHDB_API_KEY` (Header `ApiKey`). Beide stehen nie in Dateien oder im Log. Fehlt `STASHDB_API_KEY`, wird nur ThePornDB genutzt und der Job bleibt grün.
+- Höchstens ~1 Anfrage pro Sekunde, höchstens 1500 Anfragen und 28 Minuten pro Nacht (`TPDB_MIN_INTERVAL_SEC`, `TPDB_MAX_REQUESTS`, `TPDB_BUDGET_MIN`), gemeinsam: zuerst offene ThePornDB-Titel, das Restbudget für StashDB. Der Rest kommt in den nächsten Nächten dran.
 - Nur sichere Treffer: Titelähnlichkeit ≥ 0,9, bei „Seite - Titel“ muss die Seite (oder die genannten Darsteller) passen, bei „seite.JJ.MM.TT.name“ das genaue Datum; Jahr ±1; zwei gleich gute verschiedene Treffer = kein Treffer. Namen, die nur aus IDs/Hashes bestehen, werden gar nicht gesucht.
-- Darstellerbild ohne Bild in der Szene: `/performers?q=` und nur, wenn genau ein Darsteller exakt so heißt.
+- Darstellerbild ohne Bild in der Szene (ThePornDB): `/performers?q=` und nur, wenn genau ein Darsteller exakt so heißt. StashDB liefert Bilder in der Suchantwort mit.
+- StashDB hat öffentlich nur eine Szenensuche; Treffer erhalten `source=stashdb-scene` und `stashId`. Die Kunden-Map `src` bleibt `"scene"` oder `"movie"`.
 - Nie tödlich: Fehler (auch 401/429/5xx) werden geloggt (nur Zahlen, keine Titel), der Job endet immer erfolgreich, der Kunden-Export läuft weiter. Bricht der Lauf unerwartet ab (z. B. `IncompleteRead`), wird der bisherige Stand im Cache gespeichert; offene Titel kommen im nächsten Lauf dran.
-- Treffer werden nach 180 Tagen, Fehlversuche nach 30 Tagen, Darsteller-Abfragen nach 60 Tagen neu gefragt. Netzwerkfehler werden nicht gespeichert (nächste Nacht erneut).
+- Treffer werden nach 180 Tagen, ThePornDB-Fehlversuche nach 30 Tagen, Darsteller-Abfragen nach 60 Tagen neu gefragt. Ein StashDB-Fehlversuch (`fallback.stashdb.checkedAt`) wird nach 30 Tagen wiederholt. Netzwerkfehler werden nicht gespeichert (nächste Nacht erneut).
 
 ### Dateien
 
@@ -133,10 +134,11 @@ Interner Cache `data/adult-tpdb.json` (die App liest ihn **nicht**):
 
 ```json
 {"version":1,"updatedAt":"2026-11-22T02:40:00Z",
- "titles":{"<suchschluessel>":{"status":"match","checkedAt":"…","source":"scene|movie","tpdbId":"…","title":"…","site":"…",
-                               "year":"2024","poster":"https://…","background":"https://…|''","overview":"…",
+ "titles":{"<suchschluessel>":{"status":"match","checkedAt":"…","source":"scene|movie|stashdb-scene","tpdbId":"…","stashId":"…|''",
+                               "title":"…","site":"…","year":"2024","poster":"https://…","background":"https://…|''","overview":"…",
                                "performers":[{"name":"…","image":"https://…|''"}],"score":0.97},
-           "<suchschluessel>":{"status":"miss","checkedAt":"…"}},
+           "<suchschluessel>":{"status":"miss","checkedAt":"…",
+                               "fallback":{"stashdb":{"status":"miss","checkedAt":"…"}}}},
  "performers":{"<name normalisiert>":{"image":"https://…|''","checkedAt":"…"}}}
 ```
 
@@ -159,8 +161,8 @@ ENTRY (alle Felder immer vorhanden):
 | --- | --- | --- |
 | `adult` | `true` | immer `true`: nur hinter der PIN zeigen |
 | `q` | string | normalisierter Suchbegriff (Name ohne `(XXX-)`, bereinigt wie `title.clean`, dann klein, ß→ss, ohne Akzente, Nicht-Alphanumerisch→Leerzeichen). Die App vergleicht ihn mit dem aktuellen Namen der Zeile, bevor sie den Eintrag nutzt (Stream-IDs können neu vergeben werden). |
-| `src` | `"scene"` \| `"movie"` | Treffer aus `/scenes` oder `/movies` |
-| `title` | string | Titel bei TPDB (≤ 200) |
+| `src` | `"scene"` \| `"movie"` | Szene oder Film (ThePornDB `/scenes` bzw. `/movies`, oder StashDB-Szene als `"scene"`) |
+| `title` | string | Titel bei der Quelle (≤ 200) |
 | `site` | string | Studio/Seite (≤ 80, kann leer sein) |
 | `year` | string | `JJJJ` oder `""` |
 | `poster` | string | https-URL des Covers (immer gesetzt) |

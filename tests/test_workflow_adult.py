@@ -34,7 +34,9 @@ class AdultJob(unittest.TestCase):
         tp = next(v for k, v in self.steps.items() if 'TPDB' in k)
         self.assertIn('continue-on-error: true', tp)
         self.assertIn('${{ secrets.TPDB_API_KEY }}', tp)
+        self.assertIn('${{ secrets.STASHDB_API_KEY }}', tp)
         self.assertNotRegex(tp, r'echo[^\n]*TPDB_API_KEY')
+        self.assertNotRegex(tp, r'echo[^\n]*STASHDB_API_KEY')
 
     def test_export_runs_before_commit(self):
         exp = [k for k in self.names if 'Export' in k]

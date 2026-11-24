@@ -17,6 +17,8 @@ echo "== sport.json (fixtures only) =="
 python3 test_sport.py
 echo "== adult covers TPDB (mocked API) =="
 python3 test_adult_tpdb.py
+echo "== adult covers StashDB fallback (mocked API) =="
+python3 test_adult_stashdb.py
 echo "== adult job: commit/push robustness (local git only) =="
 bash ./test_git_publish.sh
 echo "== adult job: workflow structure =="
