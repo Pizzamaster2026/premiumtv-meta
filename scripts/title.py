@@ -2,18 +2,26 @@
 
 Logic mirrors PremiumTV Player Tmdb.clean (www/js/tmdb.js), including
 prefixes such as '| DE |', '[DE]', and trailing years like ' - 2013'.
+The cache cleaner also strips box-drawing catalogue markers (┃NL┃, ┃HINDI┃)
+and leftover quality tags that the player may still see raw.
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
 
 _YEAR = re.compile(r"(19|20)\d{2}")
+# ┃NL┃, ┃F1TV┃, ┃HINDI┃, ┃PUNJABI┃, |MULTI| — box-drawing or ASCII pipes.
+_BOX_PREFIX = re.compile(
+    r"^\s*[┃|]{1,3}\s*[A-Z][A-Z0-9]{1,11}\s*[┃|]{1,3}\s*",
+    re.I,
+)
 _PREFIX = re.compile(
     r"^\s*(?:"
     r"\[[^\]]{1,15}\]"
     r"|\((?:[A-Z]{2,4}|4K|UHD|FHD|HD)\)"
-    r"|[A-Z]{2,4}(?:[-_ ][A-Z]{2,4})?\s*[|:–-]\s*"
+    r"|[A-Z][A-Z0-9]{1,11}(?:[-_ ][A-Z][A-Z0-9]{1,11})?\s*[|:–┃-]\s*"
     r"|[A-Z]{2}\s*\|\s*"
     r")\s*"
 )
@@ -25,19 +33,24 @@ _COUNTRY_PAREN = re.compile(
 # Leading catalogue ranks: "11- Title", "-11- Title", "01 | Title", "12. Title"
 # Do not strip a bare number that is part of the name ("6 Ballons", "1917", "2012").
 _RANK = re.compile(r"^\s*-?\d{1,4}\s*[-–.:|)/]+\s+")
+# "44-Todesmelodie": 2–3 digit rank glued to the title, but never a year like 2001-…
+_RANK_GLUED = re.compile(r"^\s*(?!(?:19|20)\d{2})\d{2,3}[-–.](?=[A-Za-zÄÖÜäöüß])")
 _PAREN_YEAR = re.compile(r"\((19|20)\d{2}\)|\[(19|20)\d{2}\]")
 _BARE_YEAR = re.compile(r"[\s.]((19|20)\d{2})\s*$")
 _LANG_PAREN = re.compile(r"\((?:[A-Z]{2,3})\)")
 _BRACKETS = re.compile(r"\[[^\]]*\]")
 _TAG_PAREN = re.compile(
     r"\((?:[^)]*\b(?:DE|EN|GER|ENG|DEU|MULTI|OmU|OMU|DUB|SUB|4K|UHD|FHD|HD|SD|"
-    r"HDR|HEVC|H\.?265|x265|1080p|720p|2160p|3D|WEB-?DL)\b[^)]*)\)",
+    r"HDR|HEVC|H\.?265|x265|1080p|720p|480p|2160p|3D|WEB-?DL|CAM|HDCAM|HDRip|"
+    r"VFF|VOSTFR|VOST)\b[^)]*)\)",
     re.I,
 )
 _TAGS = re.compile(
     r"(?:^|[\s.\-])(?:4K|UHD|FHD|HD|SD|HDR10?\+?|DV|HEVC|H\.?26[45]|x26[45]|"
-    r"1080p|720p|2160p|3D|MULTI|GERMAN|GER|DEU|DE|ENG|EN|OmU|OMU|DL|AC3|DTS|"
-    r"ATMOS|Dolby|NEU|NEW)(?=\s|$|[|\-–.])"
+    r"1080p|720p|480p|2160p|3D|MULTI|GERMAN|GER|DEU|DE|ENG|EN|OmU|OMU|DL|AC3|DTS|"
+    r"ATMOS|Dolby|NEU|NEW|VFF|VOSTFR|VOST|HDCAM|HDRip|WEB-?DL|"
+    r"UK[\s-]?AUDIO)(?=\s|$|[|\-–.])",
+    re.I,
 )
 _MULTI_SUB = re.compile(
     r"(?:^|[\s.\-])(?:Multi(?:[\s-]?Sub(?:s|bed)?)?|Multi(?:[\s-]?Audio)?|"
@@ -58,15 +71,23 @@ _UMLAUT_SKIP_WORD = re.compile(
     r"(?i)^(?:zuerst|guests?|influencer|sequences?|consequences?|questionnaire|"
     r"unique|dialogue|catalog(?:ue)?|source|true|blue|due|queue)$"
 )
-# Strong transliteration even without Der/Die (Leberkaes, Eiskoenigin).
+# Strong transliteration even without Der/Die (Leberkaes, Eiskoenigin, Ausloeschung).
 _STRONG_TRANSLIT = re.compile(
-    r"(?i)(?:(?<![eE])(?:ae|oe|ue)(?:ck|ch|ll|ss|nig|dchen|hrte?n?|chte|cker|wen|lle|rter|tzt)|kaes)"
+    r"(?i)(?:(?<![eE])(?:ae|oe|ue)(?:ck|ch|sch|ll|ss|nig|dchen|hrte?n?|chte|cker|wen|lle|rter|tzt)|kaes)"
 )
-_PIPES = re.compile(r"[|_]+")
+_PIPES = re.compile(r"[|_┃]+")
 _TRAIL_DASH = re.compile(r"\s*[-–:]\s*$")
 _LEAD_DASH = re.compile(r"^\s*[-–:]\s*")
 _SPACES = re.compile(r"\s{2,}")
 _ZERO_WIDTH = re.compile(r"[\u200b\u00a0]")
+# Leading articles/prepositions ignored when comparing a query to a TMDB title.
+# Remainder must be long enough so "Die Hard" does not equal "Hard".
+_ARTICLES = re.compile(
+    r"^(?:the|a|an|der|die|das|dem|den|des|ein|eine|einen|einer|"
+    r"in|im|le|la|les|el|los|las|il|lo|un|une|het)\s+",
+    re.I,
+)
+_TRAIL_ONE = re.compile(r"\s+1$")
 
 
 def extract_year(value: object) -> str:
@@ -75,19 +96,20 @@ def extract_year(value: object) -> str:
     return m.group(0) if m else ""
 
 
-def clean(name: object, year: object = "") -> dict:
-    """Return {'q': cleaned title, 'year': 'YYYY' or ''}."""
-    s = _ZERO_WIDTH.sub(" ", str(name or "")).strip()
-    y = extract_year(year)
-
-    for _ in range(6):
+def _strip_leading(s: str) -> str:
+    for _ in range(8):
         s2 = _COUNTRY_PAREN.sub("", s, count=1)
+        s2 = _BOX_PREFIX.sub("", s2, count=1)
         s2 = _PREFIX.sub("", s2, count=1)
         s2 = _RANK.sub("", s2, count=1)
+        s2 = _RANK_GLUED.sub("", s2, count=1)
         if s2 == s:
             break
         s = s2
+    return s
 
+
+def _extract_title_year(s: str, y: str) -> tuple[str, str]:
     ym = _PAREN_YEAR.search(s)
     if ym and s.replace(ym.group(0), "").strip():
         if not y:
@@ -99,15 +121,29 @@ def clean(name: object, year: object = "") -> dict:
             if not y:
                 y = yb.group(1)
             s = s[: yb.start()]
+    return s, y
+
+
+def clean(name: object, year: object = "") -> dict:
+    """Return {'q': cleaned title, 'year': 'YYYY' or ''}."""
+    s = _ZERO_WIDTH.sub(" ", str(name or "")).strip()
+    y = extract_year(year)
+
+    s = _strip_leading(s)
+    s, y = _extract_title_year(s, y)
 
     s = _LANG_PAREN.sub(" ", s)
     s = _BRACKETS.sub(" ", s)
     s = _TAG_PAREN.sub(" ", s)
-    s = _TAGS.sub(" ", s)
     s = _MULTI_SUB.sub(" ", s)
+    s = _TAGS.sub(" ", s)
     s = _PIPES.sub(" ", s)
     s = _TRAIL_DASH.sub("", s)
     s = _LEAD_DASH.sub("", s)
+    s = _SPACES.sub(" ", s).strip()
+    # Quality tags after a year ("title 1999 1080p sd") hide the bare year until now.
+    s, y = _extract_title_year(s, y)
+    s = _TRAIL_DASH.sub("", s)
     s = _SPACES.sub(" ", s).strip()
     return {"q": s, "year": y}
 
@@ -159,17 +195,60 @@ def search_queries(query: str) -> list[str]:
     return out or [q]
 
 
+def _fold_diacritics(s: str) -> str:
+    parts = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in parts if not unicodedata.combining(ch))
+
+
+def _collapse_vowels(s: str) -> str:
+    # Only aa↔ā style transliteration (Baahubali / Bāhubali), not oo/ee typo folding.
+    return s.replace("aa", "a")
+
+
+def _norm_name(x: object) -> str:
+    s = str(x or "").lower().strip()
+    s = _umlaut_replace(s)
+    s = s.replace("ß", "ss")
+    s = _fold_diacritics(s)
+    s = re.sub(r"['’`´]", "", s)
+    s = re.sub(r"[^\w]+", " ", s, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _strip_article(s: str) -> str:
+    m = _ARTICLES.match(s)
+    if not m:
+        return s
+    rest = s[m.end():].strip()
+    words = rest.split()
+    if len(rest) >= 8 or (len(words) >= 2 and len(rest) >= 6):
+        return rest
+    return s
+
+
+def _name_variants(s: str) -> set[str]:
+    if not s:
+        return set()
+    bases = {s, _collapse_vowels(s)}
+    stripped = _strip_article(s)
+    if stripped != s:
+        bases.add(stripped)
+        bases.add(_collapse_vowels(stripped))
+    out = set(bases)
+    for base in bases:
+        no1 = _TRAIL_ONE.sub("", base).strip()
+        if no1 and no1 != base:
+            out.add(no1)
+            out.add(_collapse_vowels(no1))
+    return {x for x in out if x}
+
+
 def names_equivalent(a: object, b: object) -> bool:
-    """Loose equality for TMDB search hits (case, punctuation, umlauts)."""
-    def norm(x: object) -> str:
-        s = str(x or "").lower().strip()
-        s = _umlaut_replace(s)
-        s = s.replace("ß", "ss")
-        s = re.sub(r"['’`´]", "", s)
-        s = re.sub(r"[^\w]+", " ", s, flags=re.UNICODE)
-        return re.sub(r"\s+", " ", s).strip()
-    na, nb = norm(a), norm(b)
-    return bool(na and na == nb)
+    """Loose equality for TMDB search hits (case, punctuation, umlauts, articles, sequel 1)."""
+    na, nb = _norm_name(a), _norm_name(b)
+    if not na or not nb:
+        return False
+    return bool(_name_variants(na) & _name_variants(nb))
 
 
 def title_key(kind: str, name: object, year: object = "") -> str:

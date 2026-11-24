@@ -75,6 +75,38 @@ def main() -> int:
     uml = sync_meta._pick_search({"results": [{"id": 330457, "title": "Die Eiskönigin 2"}]}, "Die Eiskoenigin 2", strict=True)
     expect("strict accepts umlaut-equivalent", uml and uml["id"] == 330457, uml)
 
+    # Year filter: with-year still requires ±1; no-year fallback (year="") may accept a unique title.
+    dunes = {"results": [
+        {"id": 1, "title": "Dune", "release_date": "1984-01-01"},
+        {"id": 2, "title": "Dune", "release_date": "2021-01-01"},
+    ]}
+    expect("two same-name years stay ambiguous without year", sync_meta._pick_search(dunes, "Dune") is None)
+    expect("year picks the matching Dune", sync_meta._pick_search(dunes, "Dune", year="2021")["id"] == 2)
+    expect("wrong year still rejected", sync_meta._pick_search(dunes, "Dune", year="2000") is None)
+    alibi = {"results": [{"id": 967585, "title": "Alibi.com 2", "release_date": "2023-02-08"}]}
+    expect("with-year rejects Alibi.com 2 dated 2003", sync_meta._pick_search(alibi, "Alibi.com 2", year="2003") is None)
+    expect("no-year unique Alibi.com 2 accepted", sync_meta._pick_search(alibi, "Alibi.com 2", year="")["id"] == 967585)
+    article = {"results": [{"id": 384521, "title": "The Cloverfield Paradox", "release_date": "2018-02-04"}]}
+    expect("leading The is ignorable", sync_meta._pick_search(article, "Cloverfield Paradox", year="2018")["id"] == 384521)
+    boys = {"results": [{"id": 9737, "title": "Bad Boys", "release_date": "1995-04-07"}]}
+    expect("trailing sequel 1 is ignorable", sync_meta._pick_search(boys, "Bad Boys 1", year="1995")["id"] == 9737)
+    expect("trailing sequel 2 is not", sync_meta._pick_search(boys, "Bad Boys 2", year="1995") is None)
+    baahu = {"results": [{"id": 350312, "title": "Bāhubali 2: The Conclusion", "release_date": "2017-04-27"}]}
+    expect("diacritics fold", sync_meta._pick_search(baahu, "Baahubali 2: The Conclusion", year="2017")["id"] == 350312)
+    # Alternative titles are cheap and still require a unique equivalent name.
+    hours = {"results": [
+        {"id": 300671, "title": "13 Hours: The Secret Soldiers of Benghazi", "release_date": "2016-01-15"},
+        {"id": 99, "title": "Unrelated", "release_date": "2016-01-01"},
+    ]}
+    expect("subtitle is not a loose prefix match", sync_meta._pick_search(hours, "13 Hours", year="2016") is None)
+    alts = {300671: ["13 Hours"]}
+    expect("official alt title is a unique match",
+           sync_meta._pick_search(hours, "13 Hours", year="2016", alt_names=alts)["id"] == 300671)
+    two_alts = {300671: ["13 Hours"], 99: ["13 Hours"]}
+    expect("two alt-title hits stay ambiguous",
+           sync_meta._pick_search(hours, "13 Hours", year="2016", alt_names=two_alts) is None)
+    expect("SEARCH_REV bumped for rematch", sync_meta.SEARCH_REV >= 4)
+
     # title_key re-cleans, so a miss recorded under "11- Pulp Fiction" is still
     # found after the rank is stripped. Retry is driven by the stored query, not a new key.
     entries, prev = {}, {}

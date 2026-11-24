@@ -56,6 +56,44 @@ PREMIUMTV_CASES = [
     ("(XXX-) Tiny4K - Big Dick and Bubbles", "", "(XXX-) Tiny4K - Big Dick and Bubbles", ""),
 ]
 
+
+# 20 real TMDB-miss titles from the 24.11.2026 coverage check, plus the
+# catalogue markers that blocked those searches.
+SAMPLE_20_CASES = [
+    ("13 Hours", "2016", "13 Hours", "2016"),
+    ("6 Ballons", "2018", "6 Ballons", "2018"),
+    ("6 Leberkaes Junkie", "2019", "6 Leberkaes Junkie", "2019"),
+    ("101 Dalmatiner: Pongo Und Perdita", "1961", "101 Dalmatiner: Pongo Und Perdita", "1961"),
+    ("Alibi.com 2", "2003", "Alibi.com 2", "2003"),
+    ("Angry Birds Movie 2", "2019", "Angry Birds Movie 2", "2019"),
+    ("80 Tagen Um Die Welt", "2004", "80 Tagen Um Die Welt", "2004"),
+    ("44-Todesmelodie", "1971", "Todesmelodie", "1971"),
+    ("Bad Boys 1", "1995", "Bad Boys 1", "1995"),
+    ("American Sports Story", "2024", "American Sports Story", "2024"),
+    ("Ausloeschung", "2018", "Ausloeschung", "2018"),
+    ("Cloverfield Paradox", "2018", "Cloverfield Paradox", "2018"),
+    ("13 Geister", "2025", "13 Geister", "2025"),
+    ("┃AL┃ Cave Rescue", "", "Cave Rescue", ""),
+    ("┃FR┃ A Prince (2023)", "", "A Prince", "2023"),
+    ("┃FR┃ Le peuple miniature (2014)", "", "Le peuple miniature", "2014"),
+    ("┃AR┃ أفريكانو", "", "أفريكانو", ""),
+    ("ashami bodhu 1999 1080p sd", "", "ashami bodhu", "1999"),
+    ("┃DE┃ EM 2024: Deutschland vs Schottland", "", "EM 2024: Deutschland vs Schottland", ""),
+    ("┃FR┃ Beyonce Live at Coachella (2018)", "", "Beyonce Live at Coachella", "2018"),
+]
+
+PREFIX_AND_TAG_CASES = [
+    ("┃FR┃ Les Trois jours du Condor VFF (1975)", "", "Les Trois jours du Condor", "1975"),
+    ("Baahubali 2: The Conclusion", "2017", "Baahubali 2: The Conclusion", "2017"),
+    ("┃HINDI┃ Hathras Stampede", "2024", "Hathras Stampede", "2024"),
+    ("┃F1TV┃ F1 Australia Race 2026 UK AUDIO", "", "F1 Australia Race", "2026"),
+    ("┃PUNJABI┃ Some Film", "2020", "Some Film", "2020"),
+    ("┃MULTI┃ Horizon: An American Saga - Chapter 1", "", "Horizon: An American Saga - Chapter 1", ""),
+    ("Africano (Cam) (2001)", "", "Africano", "2001"),
+    ("┃IN┃ ashami bodhu 1999 1080p sd", "", "ashami bodhu", "1999"),
+]
+
+
 # Extra forms seen on provider lists / detail pages
 EXTRA_CASES = [
     ("| DE | The Matrix - 1999", "", "The Matrix", "1999"),
@@ -73,7 +111,7 @@ def expect(label, got, want):
 
 
 def test_clean_cases():
-    for name, year, q, yy in PLAYER_CASES + EXTRA_CASES + PREMIUMTV_CASES:
+    for name, year, q, yy in PLAYER_CASES + EXTRA_CASES + PREMIUMTV_CASES + SAMPLE_20_CASES + PREFIX_AND_TAG_CASES:
         r = clean(name, year)
         expect(f"clean({name!r}, {year!r})", r, {"q": q, "year": yy})
 
@@ -113,6 +151,17 @@ def test_umlaut_and_match_helpers():
            "One Piece: Abenteuer In Alabasta Die Wüstenprinzessin")
     expect("umlaut Zurueck", umlaut_variant("U Turn: Kein Weg Zurueck"), "U Turn: Kein Weg Zurück")
     expect("umlaut leberkaes without article", umlaut_variant("6 Leberkaes Junkie"), "6 Leberkäs Junkie")
+    expect("umlaut ausloeschung strong translit", umlaut_variant("Ausloeschung"), "Auslöschung")
+    expect("search queries ausloeschung", search_queries("Ausloeschung"), ["Ausloeschung", "Auslöschung"])
+    expect("article The", names_equivalent("Cloverfield Paradox", "The Cloverfield Paradox"), True)
+    expect("article The sequel", names_equivalent("Angry Birds Movie 2", "The Angry Birds Movie 2"), True)
+    expect("article In", names_equivalent("80 Tagen Um Die Welt", "In 80 Tagen um die Welt"), True)
+    expect("sequel 1 ignored", names_equivalent("Bad Boys 1", "Bad Boys"), True)
+    expect("sequel 2 kept", names_equivalent("Bad Boys 2", "Bad Boys"), False)
+    expect("die hard not hard", names_equivalent("Die Hard", "Hard"), False)
+    expect("diacritic baahubali", names_equivalent("Baahubali 2: The Conclusion", "Bāhubali 2: The Conclusion"), True)
+    expect("no typo balloons", names_equivalent("6 Ballons", "6 Balloons"), False)
+    expect("no loose subtitle", names_equivalent("13 Hours", "13 Hours: The Secret Soldiers of Benghazi"), False)
 
 
 def test_extract_tmdb_id():

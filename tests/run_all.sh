@@ -5,6 +5,8 @@ echo "== title cleaning =="
 python3 test_title.py
 echo "== title rematch / safe pick =="
 python3 test_rematch.py
+echo "== TMDB language fallback / alt titles =="
+python3 test_tmdb_fallback.py
 echo "== compact customer cache =="
 python3 test_client_export.py
 echo "== status.json =="

@@ -48,7 +48,11 @@ from title import clean, extract_tmdb_id, extract_year, looks_adult, names_equiv
 REFRESH_DAYS = 30
 MISS_DAYS = 14
 # Bump when search fallbacks change so non-adult misses can be tried once more.
-SEARCH_REV = 3
+SEARCH_REV = 4
+# Bump when empty de-DE overview/poster start falling back to en-US / original language.
+DETAILS_REV = 1
+# How many search hits may be inspected for TMDB alternative titles after a strict miss.
+ALT_TITLE_MAX = 5
 DEFAULT_REMATCH_MAX = 1500
 TMDB_DEFAULT_BASE = "https://api.themoviedb.org/3"
 LANGUAGE = "de-DE"
@@ -581,10 +585,16 @@ class TmdbClient:
             langs.append("en-US")
 
         def run(q: str, y: str, lang: str, strict: bool) -> Optional[dict]:
+            # Use y (not the outer year) so the no-year fallback does not keep the
+            # provider year filter. Unique equivalent title is still required.
             params = {"query": q, "language": lang, "include_adult": "false", "page": "1"}
             if y:
                 params[year_key] = y
-            return _pick_search(self.get(path, params), q, strict=True, year=year)
+            data = self.get(path, params)
+            hit = _pick_search(data, q, strict=True, year=y)
+            if hit:
+                return hit
+            return self._pick_with_alternative_titles(typ, data, q, y)
 
         # Primary: exact/equivalent title, unique result and matching known year.
         hit = run(queries[0], year, LANGUAGE, False)
@@ -612,28 +622,103 @@ class TmdbClient:
             return None
         return n if n > 0 else None
 
+    def alternative_titles(self, typ: str, tmdb_id: int) -> list[str]:
+        """Official TMDB alternative titles. Empty list on any failure."""
+        path = f"/tv/{tmdb_id}/alternative_titles" if typ == "series" else f"/movie/{tmdb_id}/alternative_titles"
+        try:
+            data = self.get(path, {})
+        except Exception:
+            return []
+        if not isinstance(data, dict):
+            return []
+        rows = data.get("titles") if typ != "series" else data.get("results")
+        if not isinstance(rows, list):
+            rows = data.get("titles") or data.get("results") or []
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            t = str(row.get("title") or "").strip()
+            if t:
+                names.append(t)
+        return names
+
+    def _pick_with_alternative_titles(self, typ: str, data: Any, query: str, year: str) -> Optional[dict]:
+        """Cheap follow-up: inspect up to ALT_TITLE_MAX search hits for an equivalent official alt title."""
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            return None
+        results = [r for r in data["results"] if isinstance(r, dict) and r.get("id")]
+        if not results or len(results) > ALT_TITLE_MAX:
+            return None
+        alt_names: dict[int, list[str]] = {}
+        for r in results:
+            try:
+                rid = int(r.get("id") or 0)
+            except (TypeError, ValueError):
+                rid = 0
+            if rid <= 0:
+                continue
+            names = self.alternative_titles(typ, rid)
+            if names:
+                alt_names[rid] = names
+        if not alt_names:
+            return None
+        return _pick_search(data, query, strict=True, year=year, alt_names=alt_names)
+
     def details(self, typ: str, tmdb_id: int) -> Optional[dict]:
         path = f"/tv/{tmdb_id}" if typ == "series" else f"/movie/{tmdb_id}"
         append = "credits,aggregate_credits" if typ == "series" else "credits"
         data = self.get(path, {"language": LANGUAGE, "append_to_response": append})
         if not isinstance(data, dict) or not data.get("id"):
             return None
-        return normalize_details(typ, data)
+        detail = normalize_details(typ, data)
+        detail["detailsRev"] = DETAILS_REV
+        if (detail.get("overview") or "").strip() and (detail.get("posterPath") or "").strip():
+            return detail
+        langs: list[str] = []
+        if not LANGUAGE.lower().startswith("en"):
+            langs.append("en-US")
+        orig = str(data.get("original_language") or "").strip()
+        primary = LANGUAGE.split("-")[0].lower()
+        if orig and orig.lower() not in {primary, "en"}:
+            langs.append(orig)
+        for lang in langs:
+            if (detail.get("overview") or "").strip() and (detail.get("posterPath") or "").strip():
+                break
+            try:
+                more = self.get(path, {"language": lang})
+            except Exception:
+                continue
+            apply_text_fallback(detail, more)
+        return detail
 
 
-def _pick_search(data: Any, query: str, strict: bool = True, year: str = "") -> Optional[dict]:
+def _pick_search(
+    data: Any,
+    query: str,
+    strict: bool = True,
+    year: str = "",
+    alt_names: Optional[dict[int, list[str]]] = None,
+) -> Optional[dict]:
     """No first-result fallback. A title must match; known years must agree ±1.
 
     The strict argument is retained for old callers, but never enables guessing.
     Without a year, multiple distinct exact-name results are ambiguous.
+    Optional alt_names maps a TMDB id to official alternative titles.
     """
     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
         return None
     hits = {}
+    extras = alt_names or {}
     for r in data["results"]:
         if not isinstance(r, dict) or not r.get("id"):
             continue
+        try:
+            rid = int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            rid = 0
         names = [r.get(k) for k in ("title", "name", "original_title", "original_name")]
+        names.extend(extras.get(rid) or [])
         if not any(names_equivalent(t, query) for t in names if t):
             continue
         ry = str(r.get("release_date") or r.get("first_air_date") or "")[:4]
@@ -641,6 +726,20 @@ def _pick_search(data: Any, query: str, strict: bool = True, year: str = "") -> 
             continue
         hits[str(r["id"])] = r
     return next(iter(hits.values())) if len(hits) == 1 else None
+
+
+def apply_text_fallback(detail: dict, data: Any) -> None:
+    """Fill an empty overview or poster from another-language TMDB details payload."""
+    if not isinstance(detail, dict) or not isinstance(data, dict):
+        return
+    if not (detail.get("overview") or "").strip():
+        ov = str(data.get("overview") or "")[:OVERVIEW_MAX]
+        if ov.strip():
+            detail["overview"] = ov
+    if not (detail.get("posterPath") or "").strip():
+        poster = _safe_path(data.get("poster_path"))
+        if poster:
+            detail["posterPath"] = poster
 
 
 def _safe_path(value: Any) -> str:
@@ -815,6 +914,7 @@ def normalize_details(typ: str, data: dict) -> dict:
         "castExtra": cast_extra,
         "directors": directors,
         "creditsRev": CREDITS_REV,
+        "detailsRev": DETAILS_REV,
     }
 
 
@@ -848,8 +948,27 @@ def credits_complete(entry: dict) -> bool:
         return False
 
 
+def details_complete(entry: dict) -> bool:
+    """True once the en-US / original-language text fallback has been applied.
+
+    Entries that already have both an overview and a poster are treated as complete
+    even if they predate DETAILS_REV, so a full cache is not re-fetched. Entries
+    missing either field are retried once, then stored with detailsRev set.
+    """
+    if not isinstance(entry, dict):
+        return False
+    try:
+        if int(entry.get("detailsRev") or 0) >= DETAILS_REV:
+            return True
+    except (TypeError, ValueError):
+        pass
+    has_ov = bool(str(entry.get("overview") or "").strip())
+    has_po = bool(str(entry.get("posterPath") or "").strip())
+    return has_ov and has_po
+
+
 def entry_current(entry: Optional[dict], now: datetime) -> bool:
-    return bool(entry) and is_fresh(entry, now, REFRESH_DAYS) and credits_complete(entry)
+    return bool(entry) and is_fresh(entry, now, REFRESH_DAYS) and credits_complete(entry) and details_complete(entry)
 
 
 def env_number(name: str, default: float, kind=float):

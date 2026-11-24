@@ -149,14 +149,28 @@ class CustomerCacheTest(unittest.TestCase):
 
     def test_stale_credits_need_refresh(self):
         now = datetime.now(timezone.utc)
-        fresh = {'updatedAt': now.isoformat(), 'creditsRev': CREDITS_REV}
-        old_rev = {'updatedAt': now.isoformat(), 'creditsRev': 0}
+        # Complete text already counts as current even without detailsRev (no mass refresh).
+        fresh = {
+            'updatedAt': now.isoformat(), 'creditsRev': CREDITS_REV,
+            'overview': 'A plot.', 'posterPath': '/p.jpg',
+        }
+        old_rev = {'updatedAt': now.isoformat(), 'creditsRev': 0, 'overview': 'A plot.', 'posterPath': '/p.jpg'}
         missing = {'updatedAt': now.isoformat()}
-        expired = {'updatedAt': (now - timedelta(days=40)).isoformat(), 'creditsRev': CREDITS_REV}
+        expired = {
+            'updatedAt': (now - timedelta(days=40)).isoformat(), 'creditsRev': CREDITS_REV,
+            'overview': 'A plot.', 'posterPath': '/p.jpg',
+        }
+        incomplete = {'updatedAt': now.isoformat(), 'creditsRev': CREDITS_REV, 'posterPath': '/p.jpg'}
+        already_tried = {
+            'updatedAt': now.isoformat(), 'creditsRev': CREDITS_REV, 'detailsRev': 1,
+            'posterPath': '/p.jpg',
+        }
         self.assertTrue(entry_current(fresh, now))
         self.assertFalse(entry_current(old_rev, now))
         self.assertFalse(entry_current(missing, now))
         self.assertFalse(entry_current(expired, now))
+        self.assertFalse(entry_current(incomplete, now))
+        self.assertTrue(entry_current(already_tried, now))
         self.assertFalse(entry_current(None, now))
 
 if __name__=='__main__':unittest.main()
