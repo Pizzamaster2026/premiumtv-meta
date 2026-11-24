@@ -1,5 +1,5 @@
 """ThePornDB adult-cover step: offline, mocked HTTP only (no real TPDB, no IPTV servers)."""
-import io, json, sys, tempfile, unittest, urllib.error
+import http.client, io, json, sys, tempfile, unittest, urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -206,6 +206,35 @@ class AdultTpdbTest(unittest.TestCase):
             self.assertEqual(A.run_step(d, token='x')['asked'], 0)
             write_titles(d, {'one:movie:1': '(XXX-) Some Title'})
             self.assertEqual(A.run_step(d, token='')['asked'], 0)
+
+    def test_unexpected_error_saves_done_work(self):
+        """IncompleteRead mid-run must keep titles already written into the cache (run 45202836952)."""
+        with tempfile.TemporaryDirectory() as tdir:
+            d = Path(tdir)
+            write_titles(d, {
+                'one:movie:2': '(XXX-) Tushy - Fortunate Buns',
+                'one:movie:1': '(XXX-) Other Studio - Unknown Film Title',
+            })
+            api = FakeApi({
+                ('/scenes', 'Tushy - Fortunate Buns'): {'data': [scene(1, 'Fortunate Buns', 'Tushy')]},
+            })
+            calls = {'n': 0}
+
+            def opener(req, timeout=None):
+                calls['n'] += 1
+                # First title (newest id: Fortunate Buns) is looked up as a scene (~1 request).
+                # The next title then hits an unexpected mid-body read error.
+                if calls['n'] > 1:
+                    raise http.client.IncompleteRead(b'partial', 20)
+                return api(req, timeout)
+
+            c, _ = client(opener)
+            st = A.run_step(d, client=c, now=NOW)
+            self.assertTrue(st['stopped'].startswith('error IncompleteRead'), st)
+            self.assertEqual(st['matched'], 1)
+            cache = json.loads((d / 'adult-tpdb.json').read_text())
+            self.assertEqual(cache['titles']['tushy fortunate buns']['status'], 'match')
+            self.assertNotIn('other studio unknown film title', cache['titles'])
 
     def test_429_waits_retry_after(self):
         calls = {'n': 0}

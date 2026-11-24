@@ -16,6 +16,7 @@ Rules
 - Performer image via /performers?q= only when exactly one performer has that name.
 - Never fails the workflow: every error is logged (without titles or the key)
   and the script exits 0. Logs contain counts only (the Actions log is public).
+  Unexpected errors (e.g. IncompleteRead) still write the cache for work already done.
 """
 from __future__ import annotations
 
@@ -576,6 +577,8 @@ def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbC
     """Never raises. Returns counts."""
     stats = {"pending": 0, "asked": 0, "matched": 0, "missed": 0, "failed": 0, "requests": 0, "stopped": ""}
     data_dir = Path(data_dir)
+    cache: Optional[dict] = None
+    now_iso = ""
     try:
         now = now or datetime.now(timezone.utc)
         now_iso = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -631,7 +634,18 @@ def run_step(data_dir: Path, token: Optional[str] = None, client: Optional[TpdbC
             f"{stats['failed']} Fehler, {client.calls} Anfragen; im Cache {total_match} Treffer.")
     except Exception as e:  # never fail the workflow
         stats["stopped"] = f"error {type(e).__name__}"
-        log(f"Unerwarteter Fehler ({type(e).__name__}) – Schritt übersprungen, Sync bleibt unberührt.")
+        log(f"Unerwarteter Fehler ({type(e).__name__}) – bisheriger Stand wird übernommen, Sync bleibt unberührt.")
+        if cache is not None:
+            try:
+                if client is not None:
+                    stats["requests"] = client.calls
+                save_cache(data_dir, cache, now_iso or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+                total_match = sum(1 for r in cache["titles"].values() if r.get("status") == "match")
+                log(f"Zwischenstand gespeichert: {stats['asked']} gefragt, {stats['matched']} Treffer, "
+                    f"{stats['missed']} ohne Treffer, {stats['failed']} Fehler, "
+                    f"{stats['requests']} Anfragen; im Cache {total_match} Treffer.")
+            except Exception:
+                log("Zwischenstand konnte nicht geschrieben werden.")
     finally:
         try:
             update_status(data_dir)

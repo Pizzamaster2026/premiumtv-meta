@@ -7,6 +7,17 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: >
+          full = TMDB plus Erwachsenen-Cover; adult = nur Erwachsenen-Cover
+          (ThePornDB), ohne den TMDB-Lauf. Der nächtliche Plan und ein Start
+          ohne Eingabe (Manager: {"ref":"main"}) bleiben bei full.
+        type: choice
+        options:
+          - full
+          - adult
+        default: full
 
 permissions:
   contents: write
@@ -17,6 +28,9 @@ concurrency:
 
 jobs:
   sync:
+    # schedule, mode=full, and a dispatch without inputs (Manager) all run this job.
+    # mode=adult skips it so only adult-covers runs (~30-35 min).
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'adult' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -93,7 +107,8 @@ jobs:
   # results makes THIS job red (visible), see scripts/git_publish.sh.
   adult-covers:
     needs: sync
-    if: ${{ !cancelled() }}
+    # always(): also run when sync was skipped (mode=adult) or failed; not after a cancel.
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     continue-on-error: true

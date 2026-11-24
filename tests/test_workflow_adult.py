@@ -109,5 +109,36 @@ class Publisher(unittest.TestCase):
         self.assertIn('PUBLISH_REGEN', sh)
 
 
+class AdultOnlyMode(unittest.TestCase):
+    """workflow_dispatch mode=adult skips TMDB and still runs adult-covers."""
+
+    def test_dispatch_mode_input_defaults_to_full(self):
+        # Manager posts only {"ref":"main"}; GitHub then applies default: full.
+        self.assertRegex(
+            WF,
+            re.compile(
+                r"workflow_dispatch:\s+inputs:\s+mode:.*?type: choice.*?options:\s+- full\s+- adult\s+default: full",
+                re.S,
+            ),
+        )
+
+    def test_sync_skipped_only_for_adult_mode(self):
+        head = job("sync").split("    steps:")[0]
+        self.assertIn(
+            "github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'adult'",
+            head,
+        )
+        # schedule and a dispatch without inputs / mode=full must still run sync
+        self.assertNotIn("event_name == 'schedule'", head)
+
+    def test_adult_covers_runs_after_skipped_or_failed_sync(self):
+        head = job("adult-covers").split("    steps:")[0]
+        self.assertIn("needs: sync", head)
+        self.assertIn("if: ${{ always() && !cancelled() }}", head)
+
+    def test_concurrency_group_unchanged(self):
+        self.assertRegex(WF, r"concurrency:\s+group: sync-meta\s+cancel-in-progress: false")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

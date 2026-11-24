@@ -49,9 +49,12 @@ Wenn du vorerst nur einen Anbieter nutzt, reicht der jeweilige Block (`PTV_*` **
 
 1. Im Repository auf den Reiter **Actions**.
 2. Links den Workflow **Sync TMDB-Metadaten** wählen.
-3. Rechts **Run workflow** → **Run workflow**.
+3. Rechts **Run workflow**. Beim Feld **mode**:
+   - **full** (Standard): kompletter TMDB-Abgleich und danach die Erwachsenen-Cover. Der nächtliche Plan und der Button „Jetzt abgleichen“ im Manager starten immer diesen Modus, auch wenn keine Eingabe mitgeschickt wird (`{"ref":"main"}`).
+   - **adult**: nur die Erwachsenen-Cover bei ThePornDB, ohne den rund zweistündigen TMDB-Lauf (etwa 30–35 Minuten). Neue Erwachsenen-Titel aus dem Katalog kommen erst nach einem vollständigen Abgleich in die Liste.
+4. **Run workflow** klicken.
 
-Beim ersten Mal kann der Lauf länger dauern (viele neue Titel). Danach bleiben bekannte Einträge liegen, und es werden nur noch neue oder veraltete Titel bei TMDB abgefragt.
+Beim ersten vollen Lauf kann es länger dauern (viele neue Titel). Danach bleiben bekannte Einträge liegen, und es werden nur noch neue oder veraltete Titel bei TMDB abgefragt.
 
 Der Job hat bei GitHub ein Zeitlimit von 120 Minuten. Das Skript holt die großen Listen mit bis zu 300 Sekunden Wartezeit und nur zwei Versuchen (pro Anbieter über `SYNC_LIST_TIMEOUT_PREMIUMTV_SEC` / `SYNC_LIST_TIMEOUT_ONE_SEC` änderbar). Anschließend bleiben für neue TMDB-Abfragen höchstens 100 Minuten, abzüglich der bereits verbrauchten Listenzeit und einer Reserve zum Speichern. Der Zwischenstand wird geschrieben, der Job endet ohne Fehler, und alle 500 neuen Einträge wird zusätzlich gespeichert. Der nächste Lauf macht bei den restlichen Titeln weiter. Filme und Serien werden dabei abwechselnd abgeglichen, damit ein Zeitlimit nicht nur eine Sorte übrig lässt.
 
@@ -107,12 +110,12 @@ Format (Zeiten in UTC-Sekunden):
 
 Für Titel, die der Abgleich als Erwachsenenfilm erkennt (gleiche Erkennung wie beim TMDB-Ausschluss: Katalog-Präfix `(XXX-)`, `title.looks_adult` / `sync_meta.is_adult_group`), sucht ein eigener Job **nach** dem TMDB-Abgleich passende Cover bei [ThePornDB](https://theporndb.net).
 
-- Workflow `sync-meta.yml`, Job `adult-covers` (läuft nach dem Job `sync`, auch wenn der fehlschlägt; nicht nach Abbruch).
+- Workflow `sync-meta.yml`, Job `adult-covers` (läuft nach dem Job `sync`, auch wenn der fehlschlägt oder im Modus `adult` übersprungen wird; nicht nach Abbruch). Manueller Start: Actions → **Sync TMDB-Metadaten** → **Run workflow** → mode **adult**.
 - Schlüssel: Repository-Secret `TPDB_API_KEY` (Bearer). Er steht nie in Dateien oder im Log.
 - Höchstens ~1 Anfrage pro Sekunde, höchstens 1500 Anfragen und 28 Minuten pro Nacht (`TPDB_MIN_INTERVAL_SEC`, `TPDB_MAX_REQUESTS`, `TPDB_BUDGET_MIN`). Der Rest kommt in den nächsten Nächten dran.
 - Nur sichere Treffer: Titelähnlichkeit ≥ 0,9, bei „Seite - Titel“ muss die Seite (oder die genannten Darsteller) passen, bei „seite.JJ.MM.TT.name“ das genaue Datum; Jahr ±1; zwei gleich gute verschiedene Treffer = kein Treffer. Namen, die nur aus IDs/Hashes bestehen, werden gar nicht gesucht.
 - Darstellerbild ohne Bild in der Szene: `/performers?q=` und nur, wenn genau ein Darsteller exakt so heißt.
-- Nie tödlich: Fehler (auch 401/429/5xx) werden geloggt (nur Zahlen, keine Titel), der Job endet immer erfolgreich, der Kunden-Export läuft weiter.
+- Nie tödlich: Fehler (auch 401/429/5xx) werden geloggt (nur Zahlen, keine Titel), der Job endet immer erfolgreich, der Kunden-Export läuft weiter. Bricht der Lauf unerwartet ab (z. B. `IncompleteRead`), wird der bisherige Stand im Cache gespeichert; offene Titel kommen im nächsten Lauf dran.
 - Treffer werden nach 180 Tagen, Fehlversuche nach 30 Tagen, Darsteller-Abfragen nach 60 Tagen neu gefragt. Netzwerkfehler werden nicht gespeichert (nächste Nacht erneut).
 
 ### Dateien
