@@ -1,0 +1,55 @@
+name: Externes EPG aktualisieren
+
+# Täglich (UTC): deutsche EPG-Datei (epgshare01) laden, auf die Sender der Anbieter abbilden und die
+# kompakte epg-de.json an den PRIVATEN EPG-Worker hochladen. Nichts davon landet im öffentlichen Repository.
+# Secrets: EPG_UPLOAD_URL (https://…/admin/epg), EPG_UPLOAD_KEY (Upload-Schlüssel), optional ONE_* für die
+# Gegenprüfung. Bei jedem Fehler bleibt die letzte gute Datei im Worker (der Player nutzt sie bis 36 h).
+on:
+  schedule:
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-epg
+  cancel-in-progress: false
+
+jobs:
+  epg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: EPG bauen
+        env:
+          ONE_URL: ${{ secrets.ONE_URL }}
+          ONE_USER: ${{ secrets.ONE_USER }}
+          ONE_PASS: ${{ secrets.ONE_PASS }}
+        run: python3 scripts/epg_build.py --out "$RUNNER_TEMP/epg-de.json"
+
+      - name: Hochladen (privat)
+        env:
+          EPG_UPLOAD_URL: ${{ secrets.EPG_UPLOAD_URL }}
+          EPG_UPLOAD_KEY: ${{ secrets.EPG_UPLOAD_KEY }}
+        run: |
+          set -eu
+          if [ -z "${EPG_UPLOAD_URL:-}" ] || [ -z "${EPG_UPLOAD_KEY:-}" ]; then
+            echo "EPG_UPLOAD_URL / EPG_UPLOAD_KEY fehlen – nichts hochgeladen."; exit 1
+          fi
+          size=$(stat -c %s "$RUNNER_TEMP/epg-de.json")
+          code=$(curl -sS -m 120 -o "$RUNNER_TEMP/resp.json" -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $EPG_UPLOAD_KEY" -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/epg-de.json" "$EPG_UPLOAD_URL" || echo curl-fehler)
+          echo "Upload: HTTP $code, $size Bytes"
+          [ "$code" = 200 ] || { head -c 300 "$RUNNER_TEMP/resp.json" 2>/dev/null || true; exit 1; }

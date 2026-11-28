@@ -15,6 +15,8 @@ echo "== sync (mock only) =="
 python3 test_sync.py
 echo "== git add status.json =="
 bash ./test_commit_add.sh
+echo "== external EPG (epg_build, fixtures only) =="
+python3 test_epg.py
 echo "== sport.json (fixtures only) =="
 python3 test_sport.py
 echo "== adult covers TPDB (mocked API) =="
