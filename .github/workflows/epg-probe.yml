@@ -1,0 +1,40 @@
+name: EPG-Probe (epgshare01)
+
+# Einmaliger Test (nur von Hand): Kann GitHub die deutsche EPG-Datei laden?
+# Speichert nichts im Repository, nur Zusammenfassung im Job.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Datei laden und prüfen
+        run: |
+          set -u
+          URL="https://epgshare01.online/epgshare01/epg_ripper_DE1.xml.gz"
+          code=$(curl -sS -L -m 120 -o epg.xml.gz -w '%{http_code}' "$URL" || echo "curl-fehler")
+          size=$(stat -c %s epg.xml.gz 2>/dev/null || echo 0)
+          if gunzip -t epg.xml.gz 2>/dev/null; then gz=ja; else gz=nein; fi
+          ch=0; pr=0
+          if [ "$gz" = ja ]; then
+            gunzip -c epg.xml.gz > epg.xml
+            ch=$(grep -c '<channel id=' epg.xml || true)
+            pr=$(grep -c '<programme ' epg.xml || true)
+          fi
+          {
+            echo "## EPG-Probe epgshare01 (DE1)"
+            echo ""
+            echo "| Wert | Ergebnis |"
+            echo "|---|---|"
+            echo "| HTTP-Status | $code |"
+            echo "| Größe (gz) | $size Bytes |"
+            echo "| gunzip ok | $gz |"
+            echo "| Sender | $ch |"
+            echo "| Sendungen | $pr |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$code" = 200 ] && [ "$gz" = ja ] && [ "$pr" -gt 1000 ]
